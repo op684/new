@@ -1,0 +1,13 @@
+# Build artifacts
+/specter
+/specter-*
+/dist/
+
+# Recon output (loot)
+/specter-out/
+*-out/
+loot/
+
+# OS / editor cruft
+.DS_Store
+*.swp
