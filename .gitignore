@@ -3,6 +3,8 @@
 /specter-*
 /vector
 /vector-*
+/phantom
+/phantom-*
 /dist/
 
 # Recon output (loot)

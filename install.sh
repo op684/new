@@ -54,8 +54,12 @@ say "building vector (endpoint analyzer)…"
 CGO_ENABLED=0 go build -ldflags "-s -w" -o vector ./cmd/vector || die "vector build failed"
 ok "vector built: $(du -h vector | cut -f1)"
 
+say "building phantom (subdomain/secret harvester)…"
+CGO_ENABLED=0 go build -ldflags "-s -w" -o phantom ./cmd/phantom || die "phantom build failed"
+ok "phantom built: $(du -h phantom | cut -f1)"
+
 # 4. Install.
-for b in specter vector; do
+for b in specter vector phantom; do
     install -m 0755 "$b" "$BIN/$b" 2>/dev/null || cp "$b" "$BIN/$b"
     chmod +x "$BIN/$b"
     ok "installed $BIN/$b"
@@ -65,6 +69,7 @@ done
 if command -v specter >/dev/null 2>&1; then
     ok "ready! recon:    specter -d target.com -all"
     ok "      analyze:  vector  -i specter-out/target.com/endpoints.txt -min high"
+    ok "      harvest:  phantom -u https://target.com -san same -sop secrets.txt"
 else
     warn "add $BIN to your PATH, then run: specter -h  /  vector -h"
 fi
