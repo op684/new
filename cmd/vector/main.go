@@ -52,6 +52,9 @@ INPUT:
 LIVE VERIFICATION (authorized targets only):
   -probe           request each absolute endpoint (status, type, size, title)
   -active          inject benign canaries to confirm reflection + open redirect
+  -sqli            active SQL injection probing (error-based + boolean-blind)
+  -lfi             active LFI / path-traversal probing (file-content proof)
+  -attack          enable ALL active tests (-active -sqli -lfi)
   -t      int      concurrent workers                       (default 40)
   -timeout dur     per-request timeout                       (default 8s)
 
@@ -69,7 +72,8 @@ FILTERING / OUTPUT:
 EXAMPLES:
   vector -i endpoints.txt -min high -top 50
   vector -i endpoints.txt -cat SSRF -o vector-out/
-  vector -i endpoints.txt -base https://app.target.com -probe -active -json
+  vector -i endpoints.txt -base https://app.target.com -attack -json
+  vector -i endpoints.txt -sqli -lfi -o loot/ -t 60
 `
 
 type options struct {
@@ -77,6 +81,8 @@ type options struct {
 	base    string
 	probe   bool
 	active  bool
+	sqli    bool
+	lfi     bool
 	threads int
 	timeout time.Duration
 	minSev  string
@@ -151,8 +157,12 @@ func parseFlags() (options, bool) {
 
 	fs.StringVar(&opt.in, "i", "", "")
 	fs.StringVar(&opt.base, "base", "", "")
+	var attack bool
 	fs.BoolVar(&opt.probe, "probe", false, "")
 	fs.BoolVar(&opt.active, "active", false, "")
+	fs.BoolVar(&opt.sqli, "sqli", false, "")
+	fs.BoolVar(&opt.lfi, "lfi", false, "")
+	fs.BoolVar(&attack, "attack", false, "")
 	fs.IntVar(&opt.threads, "t", 40, "")
 	fs.DurationVar(&opt.timeout, "timeout", 8*time.Second, "")
 	fs.StringVar(&opt.minSev, "min", "info", "")
@@ -167,8 +177,11 @@ func parseFlags() (options, bool) {
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
-	if opt.active {
-		opt.probe = true // active implies live requests
+	if attack {
+		opt.active, opt.sqli, opt.lfi = true, true, true
+	}
+	if opt.active || opt.sqli || opt.lfi {
+		opt.probe = true // any active test implies live requests
 	}
 	if opt.threads < 1 {
 		opt.threads = 1
@@ -214,7 +227,13 @@ func readInput(in string) ([]string, error) {
 }
 
 func runProbe(ctx context.Context, opt options, res *epanalyze.Result) {
-	pr := epanalyze.NewProber(opt.timeout, "Mozilla/5.0 (Linux; Android 11; VECTOR)", opt.active)
+	pr := epanalyze.NewProber(epanalyze.ProbeOptions{
+		Timeout:   opt.timeout,
+		UserAgent: "Mozilla/5.0 (Linux; Android 11; VECTOR)",
+		Active:    opt.active,
+		SQLi:      opt.sqli,
+		LFI:       opt.lfi,
+	})
 
 	var targets []*epanalyze.Endpoint
 	for _, e := range res.Endpoints {
@@ -226,14 +245,27 @@ func runProbe(ctx context.Context, opt options, res *epanalyze.Result) {
 		ui.Warning("no absolute URLs to probe (use -base to make relative paths absolute)")
 		return
 	}
-	mode := "passive GET"
+	var modes []string
 	if opt.active {
-		mode = "active (canary reflection + open-redirect)"
+		modes = append(modes, "reflection+redirect")
+	}
+	if opt.sqli {
+		modes = append(modes, "SQLi")
+	}
+	if opt.lfi {
+		modes = append(modes, "LFI")
+	}
+	mode := "passive GET"
+	if len(modes) > 0 {
+		mode = "active :: " + strings.Join(modes, " + ")
 	}
 	ui.Section("live verification :: " + mode)
+	if pr.Injects() {
+		ui.Warning("active injection enabled — only run against targets you are authorized to test")
+	}
 	ui.Info("probing %s endpoints with %d workers", ui.Bold(strconv.Itoa(len(targets))), opt.threads)
 
-	var done, live int64
+	var done, live, confirmed int64
 	jobs := make(chan *epanalyze.Endpoint, opt.threads*2)
 	var wg sync.WaitGroup
 	for i := 0; i < opt.threads; i++ {
@@ -249,6 +281,9 @@ func runProbe(ctx context.Context, opt options, res *epanalyze.Result) {
 				if r := pr.Probe(ctx, e); r != nil {
 					e.Probe = r
 					atomic.AddInt64(&live, 1)
+					if len(e.Confirmed) > 0 {
+						atomic.AddInt64(&confirmed, int64(len(e.Confirmed)))
+					}
 					reportProbe(e, r)
 				}
 				n := atomic.AddInt64(&done, 1)
@@ -264,10 +299,28 @@ func runProbe(ctx context.Context, opt options, res *epanalyze.Result) {
 	close(jobs)
 	wg.Wait()
 	ui.ClearLine()
+
+	// Confirmed vulns escalate risk/severity — re-rank so they sit on top.
+	res.Sort()
+
+	if confirmed > 0 {
+		ui.Error("%s VULNERABILITIES CONFIRMED via live injection", ui.Bold(strconv.FormatInt(confirmed, 10)))
+	}
 	ui.Success("%s live endpoints verified", ui.Bold(strconv.FormatInt(live, 10)))
 }
 
 func reportProbe(e *epanalyze.Endpoint, r *epanalyze.ProbeResult) {
+	for _, c := range e.Confirmed {
+		ui.Result("%s %s  %s",
+			ui.Bad(ui.Bold("[VULNERABLE]")), ui.Bad(c.Category),
+			ui.Dim("risk:"+strconv.Itoa(e.Risk)))
+		ui.Result("   %s %s", ui.Muted("url    :"), ui.Primary(c.URL))
+		ui.Result("   %s %s", ui.Muted("payload:"), ui.Warn(c.Payload))
+		if c.Detail != "" {
+			ui.Result("   %s %s", ui.Muted("detail :"), ui.Accent(c.Detail))
+		}
+		ui.Result("   %s %s", ui.Muted("proof  :"), ui.Accent(c.Evidence))
+	}
 	if r.OpenRedirect {
 		ui.Result("%s %s %s",
 			ui.Bad("[OPEN-REDIRECT]"), ui.Primary(e.URL),
@@ -322,16 +375,21 @@ func overview(res *epanalyze.Result) {
 
 	// Risk tally by max severity.
 	bySev := map[string]int{}
+	confirmed := 0
 	for _, e := range res.Endpoints {
-		if len(e.Vulns) > 0 {
+		if len(e.Vulns) > 0 || len(e.Confirmed) > 0 {
 			bySev[e.MaxSev]++
 		}
+		confirmed += len(e.Confirmed)
 	}
 	ui.KV("by severity", fmt.Sprintf("%s %s %s %s",
 		ui.Bad("crit:"+strconv.Itoa(bySev["CRITICAL"])),
 		ui.Warn("high:"+strconv.Itoa(bySev["HIGH"])),
 		ui.Accent("med:"+strconv.Itoa(bySev["MEDIUM"])),
 		ui.Muted("low:"+strconv.Itoa(bySev["LOW"]))))
+	if confirmed > 0 {
+		ui.KV("CONFIRMED", ui.Bad(ui.Bold(strconv.Itoa(confirmed)+" actively verified")))
+	}
 	fmt.Println()
 
 	if len(res.ParamFreq) > 0 {
@@ -372,6 +430,14 @@ func printEndpoint(e *epanalyze.Endpoint) {
 		ui.Primary(e.URL))
 	ui.Result("%s", head)
 
+	for _, c := range e.Confirmed {
+		ui.Result("       %s %s", ui.Bad(ui.Bold("✓ CONFIRMED")), ui.Bad(c.Category))
+		fmt.Println("          " + ui.Muted("payload: ") + ui.Warn(c.Payload))
+		if c.Detail != "" {
+			fmt.Println("          " + ui.Muted("detail : ") + ui.Accent(c.Detail))
+		}
+		fmt.Println("          " + ui.Muted("proof  : ") + ui.Accent(c.Evidence))
+	}
 	for _, v := range e.Vulns {
 		line := fmt.Sprintf("       %s %s", sevColor(v.Severity, "•"+v.Severity), ui.Accent(v.Category))
 		if len(v.Params) > 0 {
@@ -411,7 +477,7 @@ func writeReport(dir string, res *epanalyze.Result) {
 	}
 
 	byCat := map[string][]string{}
-	var all, highRisk, sensitive, withParams []string
+	var all, highRisk, sensitive, withParams, confirmedLines []string
 	for _, e := range res.Endpoints {
 		all = append(all, e.URL)
 		if sevValue(e.MaxSev) >= sevValue("HIGH") {
@@ -419,6 +485,11 @@ func writeReport(dir string, res *epanalyze.Result) {
 		}
 		if len(e.Params) > 0 {
 			withParams = append(withParams, e.URL)
+		}
+		for _, c := range e.Confirmed {
+			confirmedLines = append(confirmedLines,
+				fmt.Sprintf("[%s] risk:%d\n  url    : %s\n  payload: %s\n  detail : %s\n  proof  : %s\n",
+					c.Category, e.Risk, c.URL, c.Payload, c.Detail, c.Evidence))
 		}
 		for _, v := range e.Vulns {
 			byCat[v.Category] = append(byCat[v.Category], e.URL)
@@ -428,6 +499,7 @@ func writeReport(dir string, res *epanalyze.Result) {
 		}
 	}
 	write("all-endpoints.txt", all)
+	write("CONFIRMED-VULNS.txt", confirmedLines)
 	write("high-risk.txt", highRisk)
 	write("sensitive.txt", uniq(sensitive))
 	write("parameterized.txt", withParams)

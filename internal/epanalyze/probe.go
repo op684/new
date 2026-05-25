@@ -26,26 +26,37 @@ type ProbeResult struct {
 	Server            string   `json:"server,omitempty"`
 }
 
-// Prober performs live checks. In active mode it injects benign canaries to
-// detect parameter reflection (XSS surface) and open redirects.
+// ProbeOptions configures live verification.
+type ProbeOptions struct {
+	Timeout   time.Duration
+	UserAgent string
+	Active    bool // reflection + open-redirect canaries (benign)
+	SQLi      bool // active SQL injection probing (error + boolean)
+	LFI       bool // active LFI / path-traversal probing
+}
+
+// Prober performs live checks: benign canaries for reflection/open-redirect,
+// and (when enabled) active SQLi/LFI injection probing with proof capture.
 type Prober struct {
 	client    *http.Client
 	userAgent string
 	active    bool
+	sqli      bool
+	lfi       bool
 	canary    string
 	redirHost string
 }
 
 var probeTitleRX = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 
-// NewProber builds a Prober. active enables canary injection tests.
-func NewProber(timeout time.Duration, userAgent string, active bool) *Prober {
+// NewProber builds a Prober from options.
+func NewProber(o ProbeOptions) *Prober {
 	tr := &http.Transport{
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConnsPerHost: 50,
 	}
 	client := &http.Client{
-		Timeout:   timeout,
+		Timeout:   o.Timeout,
 		Transport: tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -54,12 +65,17 @@ func NewProber(timeout time.Duration, userAgent string, active bool) *Prober {
 	suffix := fmt.Sprintf("%06x", rand.Intn(0xffffff))
 	return &Prober{
 		client:    client,
-		userAgent: userAgent,
-		active:    active,
+		userAgent: o.UserAgent,
+		active:    o.Active,
+		sqli:      o.SQLi,
+		lfi:       o.LFI,
 		canary:    "spcan" + suffix,
 		redirHost: "canary" + suffix + ".specter.invalid",
 	}
 }
+
+// Injects reports whether any active injection test is enabled.
+func (p *Prober) Injects() bool { return p.active || p.sqli || p.lfi }
 
 // Probeable reports whether an endpoint can be requested (has scheme+host).
 func Probeable(e *Endpoint) bool {
@@ -86,8 +102,16 @@ func (p *Prober) Probe(ctx context.Context, e *Endpoint) *ProbeResult {
 		res.Title = squish(m[1])
 	}
 
-	if p.active && len(e.Params) > 0 {
-		p.activeTests(ctx, e, res)
+	if len(e.Params) > 0 {
+		if p.active {
+			p.activeTests(ctx, e, res)
+		}
+		if p.sqli {
+			p.sqliTests(ctx, e, body, status)
+		}
+		if p.lfi {
+			p.lfiTests(ctx, e, body)
+		}
 	}
 	return res
 }

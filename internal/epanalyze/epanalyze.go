@@ -23,18 +23,43 @@ type VulnHint struct {
 
 // Endpoint is a parsed, classified endpoint.
 type Endpoint struct {
-	Raw      string       `json:"raw"`
-	URL      string       `json:"url"`
-	Scheme   string       `json:"scheme,omitempty"`
-	Host     string       `json:"host,omitempty"`
-	Path     string       `json:"path"`
-	Ext      string       `json:"ext,omitempty"`
-	Params   []string     `json:"params,omitempty"`
-	Category string       `json:"category"`
-	Vulns    []VulnHint   `json:"vulns,omitempty"`
-	Risk     int          `json:"risk"`
-	MaxSev   string       `json:"max_severity"`
-	Probe    *ProbeResult `json:"probe,omitempty"`
+	Raw       string          `json:"raw"`
+	URL       string          `json:"url"`
+	Scheme    string          `json:"scheme,omitempty"`
+	Host      string          `json:"host,omitempty"`
+	Path      string          `json:"path"`
+	Ext       string          `json:"ext,omitempty"`
+	Params    []string        `json:"params,omitempty"`
+	Category  string          `json:"category"`
+	Vulns     []VulnHint      `json:"vulns,omitempty"`
+	Risk      int             `json:"risk"`
+	MaxSev    string          `json:"max_severity"`
+	Probe     *ProbeResult    `json:"probe,omitempty"`
+	Confirmed []ConfirmedVuln `json:"confirmed,omitempty"`
+}
+
+// ConfirmedVuln is an actively-verified vulnerability — a payload produced
+// observable proof (a SQL error, leaked file content, reflected canary, ...).
+type ConfirmedVuln struct {
+	Category string `json:"category"`
+	Param    string `json:"param,omitempty"`
+	Payload  string `json:"payload"`
+	URL      string `json:"url"`
+	Evidence string `json:"evidence"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+// confirm records an actively-verified finding and escalates the endpoint to
+// CRITICAL (proof beats heuristics).
+func (e *Endpoint) confirm(cv ConfirmedVuln) {
+	for _, c := range e.Confirmed {
+		if c.Category == cv.Category && c.Param == cv.Param {
+			return // already confirmed for this param/class
+		}
+	}
+	e.Confirmed = append(e.Confirmed, cv)
+	e.Risk += Critical.Weight() + 15
+	e.MaxSev = "CRITICAL"
 }
 
 // Result is the aggregate analysis over a whole endpoint list.
@@ -96,8 +121,18 @@ func Analyze(lines []string, base string) *Result {
 	}
 	sort.Strings(r.Hosts)
 
-	// Triage order: highest max-severity first, then accumulated risk, then URL.
+	r.Sort()
+	return r
+}
+
+// Sort orders endpoints for triage: confirmed first, then by max-severity,
+// then accumulated risk, then URL. Safe to call again after live probing.
+func (r *Result) Sort() {
 	sort.SliceStable(r.Endpoints, func(i, j int) bool {
+		ci, cj := len(r.Endpoints[i].Confirmed) > 0, len(r.Endpoints[j].Confirmed) > 0
+		if ci != cj {
+			return ci
+		}
 		si, sj := sevRank(r.Endpoints[i].MaxSev), sevRank(r.Endpoints[j].MaxSev)
 		if si != sj {
 			return si > sj
@@ -107,7 +142,6 @@ func Analyze(lines []string, base string) *Result {
 		}
 		return r.Endpoints[i].URL < r.Endpoints[j].URL
 	})
-	return r
 }
 
 func sevRank(s string) int {
