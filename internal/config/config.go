@@ -41,17 +41,15 @@ type Config struct {
 	Passive   bool
 	BruteSubs bool
 	Probe     bool
-	Ports     bool
 	Tech      bool
 	Content   bool
 	URLs      bool
 	JS        bool
 	All       bool
 
-	// Wordlists / ports
+	// Wordlists
 	SubWordlist     string
 	ContentWordlist string
-	PortSpec        string
 
 	// Behaviour
 	FollowRedirect bool
@@ -69,11 +67,10 @@ TARGET:
   -l   string   file with one domain per line
 
 MODULES (enable individually, or use -all):
-  -all          run the full pipeline (passive+brute+probe+ports+tech+urls+js)
+  -all          run the full pipeline (passive+brute+probe+tech+urls+js)
   -passive      passive subdomain enumeration (crt.sh, OTX, hackertarget, ...)
   -brute        active DNS subdomain bruteforce
   -probe        HTTP/HTTPS probing (title, status, sec-headers, CORS, takeover)
-  -ports        TCP port scan + service banner grabbing
   -tech         technology / stack fingerprinting
   -urls         historical URL mining (Wayback CDX, OTX) + param extraction
   -content      content / directory discovery on live hosts
@@ -84,7 +81,6 @@ TUNING:
   -timeout dur   per-request timeout                 (default 8s)
   -rate int      max requests/sec (0 = unlimited)    (default 0)
   -retries int   network retry attempts              (default 1)
-  -ports-list s  ports: "top", "full", or "80,443,8080-8090"
   -ws  string    subdomain bruteforce wordlist file (uses built-in if empty)
   -cw  string    content discovery wordlist file    (uses built-in if empty)
   -r   string    comma-separated DNS resolvers       (default 1.1.1.1,8.8.8.8)
@@ -133,7 +129,6 @@ func Parse(args []string) (*Config, error) {
 	fs.BoolVar(&c.Passive, "passive", false, "")
 	fs.BoolVar(&c.BruteSubs, "brute", false, "")
 	fs.BoolVar(&c.Probe, "probe", false, "")
-	fs.BoolVar(&c.Ports, "ports", false, "")
 	fs.BoolVar(&c.Tech, "tech", false, "")
 	fs.BoolVar(&c.URLs, "urls", false, "")
 	fs.BoolVar(&c.Content, "content", false, "")
@@ -143,7 +138,6 @@ func Parse(args []string) (*Config, error) {
 	fs.DurationVar(&c.Timeout, "timeout", 8*time.Second, "")
 	fs.IntVar(&c.Rate, "rate", 0, "")
 	fs.IntVar(&c.Retries, "retries", 1, "")
-	fs.StringVar(&c.PortSpec, "ports-list", "top", "")
 	fs.StringVar(&c.SubWordlist, "ws", "", "")
 	fs.StringVar(&c.ContentWordlist, "cw", "", "")
 	fs.StringVar(&resolvers, "r", "1.1.1.1,8.8.8.8,9.9.9.9", "")
@@ -189,8 +183,8 @@ func Parse(args []string) (*Config, error) {
 	}
 
 	if c.All {
-		c.Passive, c.BruteSubs, c.Probe, c.Ports, c.Tech, c.URLs, c.JS =
-			true, true, true, true, true, true, true
+		c.Passive, c.BruteSubs, c.Probe, c.Tech, c.URLs, c.JS =
+			true, true, true, true, true, true
 	}
 	// If no module selected at all, default to a sensible passive+probe+tech sweep.
 	if !c.anyModule() {
@@ -211,7 +205,7 @@ func Parse(args []string) (*Config, error) {
 }
 
 func (c *Config) anyModule() bool {
-	return c.Passive || c.BruteSubs || c.Probe || c.Ports || c.Tech || c.URLs || c.Content || c.JS
+	return c.Passive || c.BruteSubs || c.Probe || c.Tech || c.URLs || c.Content || c.JS
 }
 
 func (c *Config) loadTargets() error {

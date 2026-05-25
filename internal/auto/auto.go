@@ -43,7 +43,7 @@ TARGET:
   -l   string   file with domains (one per line)
 
 PIPELINE:
-  -deep         maximum coverage: + content discovery + larger port set
+  -deep         maximum coverage: + content discovery
   -attack       active vuln probing on collected endpoints (SQLi/LFI/XSS/redirect)
   -san string   SAN certificate harvesting: "same" (default), "all", or "off"
   -git          also harvest GitHub code search (needs -gt)
@@ -377,16 +377,13 @@ func writeReports(opt options, res *core.Result, ares *epanalyze.Result, target 
 }
 
 func grandSummary(res *core.Result, ares *epanalyze.Result, target, outDir string, dur time.Duration) {
-	var resolved, live, withPorts, takeovers int
+	var resolved, live, takeovers int
 	for _, a := range res.Assets {
 		if a.Resolved {
 			resolved++
 		}
 		if a.HTTP != nil {
 			live++
-		}
-		if len(a.Ports) > 0 {
-			withPorts++
 		}
 		if a.Takeover != "" {
 			takeovers++
@@ -407,7 +404,6 @@ func grandSummary(res *core.Result, ares *epanalyze.Result, target, outDir strin
 	ui.KV("subdomains", ui.Bold(strconv.Itoa(len(res.Assets))))
 	ui.KV("resolved", ui.Good(strconv.Itoa(resolved)))
 	ui.KV("live http", ui.Good(strconv.Itoa(live)))
-	ui.KV("open-port hosts", ui.Warn(strconv.Itoa(withPorts)))
 	ui.KV("takeovers", redFlag(takeovers))
 	ui.KV("urls", ui.Bold(strconv.Itoa(len(res.URLs))))
 	ui.KV("endpoints", ui.Bold(strconv.Itoa(ares.Total)))
@@ -432,8 +428,7 @@ func grandSummary(res *core.Result, ares *epanalyze.Result, target, outDir strin
 // ---- helpers ----
 
 func reconConfig(opt options) *config.Config {
-	portSpec := "top"
-	cfg := &config.Config{
+	return &config.Config{
 		Threads:   opt.threads,
 		Timeout:   opt.timeout,
 		Resolvers: []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"},
@@ -444,13 +439,10 @@ func reconConfig(opt options) *config.Config {
 		Tech:      true,
 		URLs:      true,
 		JS:        true,
-		Ports:     true,
 		Content:   opt.deep,
-		PortSpec:  portSpec,
 		Theme:     "cyberpunk",
 		OutDir:    opt.out,
 	}
-	return cfg
 }
 
 func parse(args []string) options {

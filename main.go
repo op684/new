@@ -62,7 +62,7 @@ USAGE:
 COMMANDS:
   auto       full automated pipeline: recon → harvest → analyze, chained
              (best starting point — one command does everything)
-  recon      subdomain enumeration, resolution, probing, ports, urls, js, content
+  recon      subdomain enumeration, resolution, probing, urls, js, content
   harvest    JS/secret/cloud/SAN/GitHub harvesting (SubDomainizer, upgraded)
   analyze    endpoint attack-surface analysis + active SQLi/LFI/XSS probing
   version    print version

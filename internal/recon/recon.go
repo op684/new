@@ -19,7 +19,6 @@ import (
 	"specter/internal/content"
 	"specter/internal/core"
 	"specter/internal/jsrecon"
-	"specter/internal/portscan"
 	"specter/internal/probe"
 	"specter/internal/report"
 	"specter/internal/resolver"
@@ -84,9 +83,9 @@ func printPlan(cfg *config.Config) {
 		return ui.Muted("off")
 	}
 	ui.Info("targets:    %s", ui.Bold(fmt.Sprintf("%d", len(cfg.Targets))))
-	ui.Info("modules:    passive:%s brute:%s probe:%s ports:%s tech:%s urls:%s js:%s content:%s",
+	ui.Info("modules:    passive:%s brute:%s probe:%s tech:%s urls:%s js:%s content:%s",
 		enabled(cfg.Passive), enabled(cfg.BruteSubs), enabled(cfg.Probe),
-		enabled(cfg.Ports), enabled(cfg.Tech), enabled(cfg.URLs), enabled(cfg.JS), enabled(cfg.Content))
+		enabled(cfg.Tech), enabled(cfg.URLs), enabled(cfg.JS), enabled(cfg.Content))
 	ui.Info("threads:    %s   timeout: %s   resolvers: %d",
 		ui.Bold(fmt.Sprintf("%d", cfg.Threads)), cfg.Timeout, len(cfg.Resolvers))
 }
@@ -116,9 +115,6 @@ func ReconTarget(ctx context.Context, cfg *config.Config, target string) *core.R
 
 	if cfg.Probe || cfg.Tech || cfg.JS {
 		runProbe(ctx, cfg, res)
-	}
-	if cfg.Ports {
-		runPorts(ctx, cfg, res)
 	}
 	if cfg.URLs {
 		runURLs(ctx, httpClient, res, target)
@@ -317,61 +313,6 @@ func runProbe(ctx context.Context, cfg *config.Config, res *core.Result) {
 	close(jobs)
 	wg.Wait()
 	ui.Success("%s live HTTP services", ui.Bold(fmt.Sprintf("%d", live)))
-}
-
-func runPorts(ctx context.Context, cfg *config.Config, res *core.Result) {
-	ports, err := portscan.ParsePorts(cfg.PortSpec)
-	if err != nil {
-		ui.Error("port spec: %v", err)
-		return
-	}
-	ui.Section(fmt.Sprintf("port scan :: %d ports", len(ports)))
-
-	var targets []*core.Asset
-	for _, a := range res.Assets {
-		if a.Resolved {
-			targets = append(targets, a)
-		}
-	}
-	if len(targets) == 0 {
-		ui.Warning("no resolved hosts to scan")
-		return
-	}
-
-	// Per-host worker budget so we don't overload a phone's file descriptors.
-	hostWorkers := cfg.Threads
-	if hostWorkers > 200 {
-		hostWorkers = 200
-	}
-	for _, a := range targets {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		scanTarget := a.Host
-		if len(a.IPs) > 0 {
-			scanTarget = a.IPs[0]
-		}
-		open := portscan.Scan(ctx, scanTarget, ports, hostWorkers, cfg.Timeout)
-		if len(open) == 0 {
-			continue
-		}
-		res.Lock()
-		a.Ports = open
-		res.Unlock()
-		labels := make([]string, len(open))
-		for i, p := range open {
-			labels[i] = portscan.Label(p.Port)
-		}
-		ui.Result("%s %s", ui.Primary(a.Host), ui.Warn("→ "+join(labels)))
-		for _, p := range open {
-			if p.Banner != "" {
-				ui.Muted2("       %d/%s  %s", p.Port, p.Service, p.Banner)
-			}
-		}
-	}
-	ui.Success("port scan complete")
 }
 
 func runURLs(ctx context.Context, client *http.Client, res *core.Result, target string) {

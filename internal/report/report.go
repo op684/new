@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"specter/internal/core"
-	"specter/internal/portscan"
 	"specter/internal/ui"
 )
 
@@ -89,23 +88,6 @@ func (w *Writer) Persist(r *core.Result) error {
 	urlsInteresting = interesting(r.URLs)
 	w.writeLines("urls-interesting.txt", urlsInteresting)
 
-	var ports []string
-	for _, a := range r.Assets {
-		if len(a.Ports) == 0 {
-			continue
-		}
-		var parts []string
-		for _, p := range a.Ports {
-			label := portscan.Label(p.Port)
-			if p.Banner != "" {
-				label += " (" + p.Banner + ")"
-			}
-			parts = append(parts, label)
-		}
-		ports = append(ports, a.Host+": "+strings.Join(parts, ", "))
-	}
-	w.writeLines("ports.txt", ports)
-
 	var findings []string
 	for _, f := range r.Findings {
 		findings = append(findings, fmt.Sprintf("%d %8d %s", f.StatusCode, f.ContentLength, f.URL))
@@ -148,14 +130,11 @@ func interesting(urls []string) []string {
 
 // Summary prints a stylized end-of-run dashboard.
 func Summary(r *core.Result, dir string) {
-	var resolved, live, withPorts, takeovers, corsIssues, secHdr int
+	var resolved, live, takeovers, corsIssues, secHdr int
 	codes := map[int]int{}
 	for _, a := range r.Assets {
 		if a.Resolved {
 			resolved++
-		}
-		if len(a.Ports) > 0 {
-			withPorts++
 		}
 		if a.Takeover != "" {
 			takeovers++
@@ -174,7 +153,6 @@ func Summary(r *core.Result, dir string) {
 	ui.KV("subdomains", ui.Bold(strconv.Itoa(len(r.Assets))))
 	ui.KV("resolved", ui.Good(strconv.Itoa(resolved)))
 	ui.KV("live http", ui.Good(strconv.Itoa(live)))
-	ui.KV("with ports", ui.Warn(strconv.Itoa(withPorts)))
 	ui.KV("urls", ui.Bold(strconv.Itoa(len(r.URLs))))
 	ui.KV("params", ui.Bold(strconv.Itoa(len(r.Params))))
 	ui.KV("js files", ui.Bold(strconv.Itoa(len(r.JSFiles))))

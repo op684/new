@@ -15,17 +15,9 @@ type Asset struct {
 	Source     string            `json:"source,omitempty"`
 	Resolved   bool              `json:"resolved"`
 	HTTP       *HTTPResult       `json:"http,omitempty"`
-	Ports      []PortInfo        `json:"ports,omitempty"`
 	Technology []string          `json:"technology,omitempty"`
 	Takeover   string            `json:"takeover,omitempty"`
 	Tags       map[string]string `json:"tags,omitempty"`
-}
-
-// PortInfo is an open TCP port plus any grabbed service banner.
-type PortInfo struct {
-	Port    int    `json:"port"`
-	Service string `json:"service,omitempty"`
-	Banner  string `json:"banner,omitempty"`
 }
 
 // HTTPResult captures the outcome of probing a host over HTTP/HTTPS.
