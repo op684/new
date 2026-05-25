@@ -98,6 +98,37 @@ func otxURLs(ctx context.Context, client *http.Client, domain string) ([]string,
 	return out, nil
 }
 
+// Params extracts the unique set of query-parameter names across all URLs —
+// a ready-made fuzzing list.
+func Params(rawURLs []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, raw := range rawURLs {
+		q := raw
+		if i := strings.IndexByte(q, '?'); i >= 0 {
+			q = q[i+1:]
+		} else {
+			continue
+		}
+		if i := strings.IndexByte(q, '#'); i >= 0 {
+			q = q[:i]
+		}
+		for _, pair := range strings.Split(q, "&") {
+			name := pair
+			if i := strings.IndexByte(pair, '='); i >= 0 {
+				name = pair[:i]
+			}
+			name = strings.TrimSpace(name)
+			if name != "" && len(name) < 64 && !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Interesting flags URLs whose extension or path commonly leads to findings.
 func Interesting(urls []string) []string {
 	markers := []string{

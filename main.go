@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -16,11 +17,13 @@ import (
 	"specter/internal/config"
 	"specter/internal/content"
 	"specter/internal/core"
+	"specter/internal/jsrecon"
 	"specter/internal/portscan"
 	"specter/internal/probe"
 	"specter/internal/report"
 	"specter/internal/resolver"
 	"specter/internal/subenum"
+	"specter/internal/takeover"
 	"specter/internal/ui"
 	"specter/internal/urls"
 	"specter/internal/wordlist"
@@ -70,9 +73,9 @@ func printPlan(cfg *config.Config) {
 		return ui.Muted("off")
 	}
 	ui.Info("targets:    %s", ui.Bold(fmt.Sprintf("%d", len(cfg.Targets))))
-	ui.Info("modules:    passive:%s brute:%s probe:%s ports:%s tech:%s urls:%s content:%s",
+	ui.Info("modules:    passive:%s brute:%s probe:%s ports:%s tech:%s urls:%s js:%s content:%s",
 		enabled(cfg.Passive), enabled(cfg.BruteSubs), enabled(cfg.Probe),
-		enabled(cfg.Ports), enabled(cfg.Tech), enabled(cfg.URLs), enabled(cfg.Content))
+		enabled(cfg.Ports), enabled(cfg.Tech), enabled(cfg.URLs), enabled(cfg.JS), enabled(cfg.Content))
 	ui.Info("threads:    %s   timeout: %s   resolvers: %d",
 		ui.Bold(fmt.Sprintf("%d", cfg.Threads)), cfg.Timeout, len(cfg.Resolvers))
 }
@@ -103,7 +106,7 @@ func runTarget(ctx context.Context, cfg *config.Config, target string) {
 	// Resolve everything we discovered (passive sources don't confirm liveness).
 	resolveAll(ctx, cfg, dns, res)
 
-	if cfg.Probe || cfg.Tech {
+	if cfg.Probe || cfg.Tech || cfg.JS {
 		runProbe(ctx, cfg, res)
 	}
 	if cfg.Ports {
@@ -111,6 +114,9 @@ func runTarget(ctx context.Context, cfg *config.Config, target string) {
 	}
 	if cfg.URLs {
 		runURLs(ctx, httpClient, res, target)
+	}
+	if cfg.JS {
+		runJS(ctx, cfg, httpClient, res, target)
 	}
 	if cfg.Content {
 		runContent(ctx, cfg, res)
@@ -264,7 +270,7 @@ func runProbe(ctx context.Context, cfg *config.Config, res *core.Result) {
 					return
 				default:
 				}
-				result := pr.Probe(ctx, h)
+				result, snippet := pr.Probe(ctx, h)
 				if result == nil {
 					continue
 				}
@@ -275,12 +281,18 @@ func runProbe(ctx context.Context, cfg *config.Config, res *core.Result) {
 				if a == nil {
 					continue
 				}
+				if len(a.IPs) > 0 {
+					result.IP = a.IPs[0]
+				}
+				if tk := takeover.Check(a.CNAME, snippet); tk != "" {
+					a.Takeover = tk
+				}
 				res.Lock()
 				a.HTTP = result
 				a.Technology = result.Technology
 				res.Unlock()
 				atomic.AddInt64(&live, 1)
-				printLive(result)
+				printLive(result, a.Takeover)
 			}
 		}()
 	}
@@ -331,13 +343,18 @@ func runPorts(ctx context.Context, cfg *config.Config, res *core.Result) {
 			continue
 		}
 		res.Lock()
-		a.OpenPorts = open
+		a.Ports = open
 		res.Unlock()
 		labels := make([]string, len(open))
 		for i, p := range open {
-			labels[i] = portscan.Label(p)
+			labels[i] = portscan.Label(p.Port)
 		}
 		ui.Result("%s %s", ui.Primary(a.Host), ui.Warn("→ "+join(labels)))
+		for _, p := range open {
+			if p.Banner != "" {
+				ui.Muted2("       %d/%s  %s", p.Port, p.Service, p.Banner)
+			}
+		}
 	}
 	ui.Success("port scan complete")
 }
@@ -353,7 +370,11 @@ func runURLs(ctx context.Context, client *http.Client, res *core.Result, target 
 		return
 	}
 	res.URLs = found
+	res.Params = urls.Params(found)
 	ui.Success("collected %s archived URLs", ui.Bold(fmt.Sprintf("%d", len(found))))
+	if len(res.Params) > 0 {
+		ui.Info("extracted %s unique query parameters (see params.txt)", ui.Bold(fmt.Sprintf("%d", len(res.Params))))
+	}
 	interesting := urls.Interesting(found)
 	if len(interesting) > 0 {
 		ui.Warning("%s URLs look interesting (params/secrets/endpoints):", ui.Bold(fmt.Sprintf("%d", len(interesting))))
@@ -411,9 +432,90 @@ func runContent(ctx context.Context, cfg *config.Config, res *core.Result) {
 	ui.Success("content discovery found %s endpoints", ui.Bold(fmt.Sprintf("%d", total)))
 }
 
+func runJS(ctx context.Context, cfg *config.Config, client *http.Client, res *core.Result, target string) {
+	ui.Section("javascript recon :: endpoints + secrets")
+
+	scanner := jsrecon.New(client, cfg.UserAgent, target, 300)
+
+	// 1. Gather candidate JS files: linked from live pages + archived .js URLs.
+	var jsURLs, inlineBlobs []string
+	seen := map[string]bool{}
+	addJS := func(u string) {
+		if u != "" && !seen[u] {
+			seen[u] = true
+			jsURLs = append(jsURLs, u)
+		}
+	}
+
+	var pages []string
+	for _, a := range res.Assets {
+		if a.HTTP != nil {
+			pages = append(pages, a.HTTP.URL)
+		}
+	}
+	if len(pages) > 0 {
+		sp := ui.NewSpinner(fmt.Sprintf("crawling %d live pages for script references…", len(pages)))
+		sp.Start()
+		for _, p := range pages {
+			select {
+			case <-ctx.Done():
+				sp.Stop()
+				return
+			default:
+			}
+			js, inl := scanner.DiscoverFromPage(ctx, p)
+			for _, u := range js {
+				addJS(u)
+			}
+			inlineBlobs = append(inlineBlobs, inl...)
+		}
+		sp.Stop()
+	}
+	for _, u := range res.URLs {
+		if strings.HasSuffix(strings.ToLower(strings.SplitN(u, "?", 2)[0]), ".js") {
+			addJS(u)
+		}
+	}
+
+	if len(jsURLs) == 0 && len(inlineBlobs) == 0 {
+		ui.Warning("no JavaScript found — run with -probe (and ideally -urls) first")
+		return
+	}
+	ui.Info("analyzing %s external scripts + %s inline blocks",
+		ui.Bold(fmt.Sprintf("%d", len(jsURLs))), ui.Bold(fmt.Sprintf("%d", len(inlineBlobs))))
+
+	report := scanner.Run(ctx, jsURLs, inlineBlobs, cfg.Threads,
+		func(s core.Secret) {
+			ui.Result("%s %s %s",
+				ui.Bad("[SECRET]"), ui.Warn(s.Type), ui.Accent(s.Match))
+			ui.Muted2("       ↳ %s", s.Source)
+		}, nil)
+
+	res.Lock()
+	res.Endpoints = report.Endpoints
+	res.Secrets = report.Secrets
+	res.JSFiles = report.JSFiles
+	res.Unlock()
+
+	// New subdomains found inside JS feed straight back into the asset graph.
+	newSubs := 0
+	for _, sub := range report.Subdomains {
+		if res.Get(sub) == nil {
+			res.Upsert(sub, "javascript")
+			newSubs++
+		}
+	}
+
+	ui.Success("parsed %s JS files → %s endpoints, %s secrets, %s new subdomains",
+		ui.Bold(fmt.Sprintf("%d", len(report.JSFiles))),
+		ui.Bold(fmt.Sprintf("%d", len(report.Endpoints))),
+		ui.Bold(fmt.Sprintf("%d", len(report.Secrets))),
+		ui.Bold(fmt.Sprintf("%d", newSubs)))
+}
+
 // ---- presentation helpers ----
 
-func printLive(r *core.HTTPResult) {
+func printLive(r *core.HTTPResult, takeover string) {
 	parts := fmt.Sprintf("%s %s", codeColor(r.StatusCode, fmt.Sprintf("[%d]", r.StatusCode)), ui.Primary(r.URL))
 	if r.Title != "" {
 		parts += " " + ui.Secondary("["+r.Title+"]")
@@ -425,6 +527,15 @@ func printLive(r *core.HTTPResult) {
 		parts += " " + ui.Accent("["+join(r.Technology)+"]")
 	}
 	ui.Result("%s", parts)
+	if r.CORS != "" {
+		ui.Muted2("       %s %s", ui.Bad("CORS:"), r.CORS)
+	}
+	if len(r.SecurityIssues) > 0 {
+		ui.Muted2("       %s %s", ui.Warn("sec:"), join(r.SecurityIssues))
+	}
+	if takeover != "" {
+		ui.Result("       %s %s", ui.Bad("[TAKEOVER]"), ui.Warn(takeover))
+	}
 }
 
 func codeColor(code int, s string) string {

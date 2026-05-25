@@ -25,7 +25,7 @@ var (
 	enabled     = true
 	interactive = true
 	mu          sync.Mutex
-	theme       = Themes["matrix"]
+	theme       = Themes["cyberpunk"]
 )
 
 // Theme is a named palette. Colors are 24-bit truecolor "r;g;b" triplets,
@@ -43,32 +43,13 @@ type Theme struct {
 	GradientB [3]int
 }
 
-// Themes is the built-in palette set selectable with -theme.
+// Themes is the built-in palette set. SPECTER ships a single, finely-tuned
+// cyberpunk palette (neon magenta / electric cyan) for maximum terminal pop.
 var Themes = map[string]Theme{
-	"matrix": {
-		Name: "matrix", Primary: "0;255;65", Secondary: "0;180;45", Accent: "180;255;180",
-		Good: "0;255;120", Warn: "255;215;0", Bad: "255;60;60", Muted: "90;120;90",
-		GradientA: [3]int{0, 80, 20}, GradientB: [3]int{0, 255, 90},
-	},
 	"cyberpunk": {
 		Name: "cyberpunk", Primary: "255;0;200", Secondary: "0;220;255", Accent: "255;240;120",
 		Good: "0;255;170", Warn: "255;180;0", Bad: "255;40;90", Muted: "120;90;140",
 		GradientA: [3]int{120, 0, 200}, GradientB: [3]int{0, 220, 255},
-	},
-	"blood": {
-		Name: "blood", Primary: "255;40;40", Secondary: "180;20;20", Accent: "255;160;120",
-		Good: "0;220;120", Warn: "255;190;0", Bad: "255;0;0", Muted: "130;70;70",
-		GradientA: [3]int{60, 0, 0}, GradientB: [3]int{255, 50, 30},
-	},
-	"ice": {
-		Name: "ice", Primary: "120;220;255", Secondary: "60;160;230", Accent: "220;245;255",
-		Good: "120;255;200", Warn: "255;220;120", Bad: "255;110;130", Muted: "100;140;170",
-		GradientA: [3]int{10, 60, 120}, GradientB: [3]int{150, 230, 255},
-	},
-	"ghost": {
-		Name: "ghost", Primary: "220;220;235", Secondary: "150;150;180", Accent: "255;255;255",
-		Good: "160;255;180", Warn: "255;225;150", Bad: "255;120;120", Muted: "110;110;130",
-		GradientA: [3]int{40, 40, 60}, GradientB: [3]int{230, 230, 245},
 	},
 }
 

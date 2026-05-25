@@ -15,27 +15,45 @@ type Asset struct {
 	Source     string            `json:"source,omitempty"`
 	Resolved   bool              `json:"resolved"`
 	HTTP       *HTTPResult       `json:"http,omitempty"`
-	OpenPorts  []int             `json:"open_ports,omitempty"`
+	Ports      []PortInfo        `json:"ports,omitempty"`
 	Technology []string          `json:"technology,omitempty"`
+	Takeover   string            `json:"takeover,omitempty"`
 	Tags       map[string]string `json:"tags,omitempty"`
+}
+
+// PortInfo is an open TCP port plus any grabbed service banner.
+type PortInfo struct {
+	Port    int    `json:"port"`
+	Service string `json:"service,omitempty"`
+	Banner  string `json:"banner,omitempty"`
 }
 
 // HTTPResult captures the outcome of probing a host over HTTP/HTTPS.
 type HTTPResult struct {
-	URL           string            `json:"url"`
-	Scheme        string            `json:"scheme"`
-	StatusCode    int               `json:"status_code"`
-	Title         string            `json:"title,omitempty"`
-	Server        string            `json:"server,omitempty"`
-	ContentType   string            `json:"content_type,omitempty"`
-	ContentLength int64             `json:"content_length"`
-	Words         int               `json:"words"`
-	Lines         int               `json:"lines"`
-	Location      string            `json:"location,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	Technology    []string          `json:"technology,omitempty"`
-	Latency       time.Duration     `json:"latency_ms"`
-	Favicon       string            `json:"favicon_hash,omitempty"`
+	URL            string            `json:"url"`
+	Scheme         string            `json:"scheme"`
+	StatusCode     int               `json:"status_code"`
+	Title          string            `json:"title,omitempty"`
+	Server         string            `json:"server,omitempty"`
+	ContentType    string            `json:"content_type,omitempty"`
+	ContentLength  int64             `json:"content_length"`
+	Words          int               `json:"words"`
+	Lines          int               `json:"lines"`
+	Location       string            `json:"location,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Technology     []string          `json:"technology,omitempty"`
+	Latency        time.Duration     `json:"latency_ms"`
+	Favicon        string            `json:"favicon_hash,omitempty"`
+	SecurityIssues []string          `json:"security_issues,omitempty"`
+	CORS           string            `json:"cors,omitempty"`
+	IP             string            `json:"ip,omitempty"`
+}
+
+// Secret is a sensitive token/key recovered from JavaScript or responses.
+type Secret struct {
+	Type   string `json:"type"`
+	Match  string `json:"match"`
+	Source string `json:"source"`
 }
 
 // Finding is an endpoint discovered during content discovery.
@@ -54,7 +72,11 @@ type Result struct {
 	Duration  string    `json:"duration"`
 	Assets    []*Asset  `json:"assets"`
 	URLs      []string  `json:"urls,omitempty"`
+	Params    []string  `json:"params,omitempty"`
 	Findings  []Finding `json:"findings,omitempty"`
+	JSFiles   []string  `json:"js_files,omitempty"`
+	Endpoints []string  `json:"endpoints,omitempty"`
+	Secrets   []Secret  `json:"secrets,omitempty"`
 
 	mu    sync.Mutex
 	index map[string]*Asset

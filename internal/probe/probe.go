@@ -63,23 +63,29 @@ func New(o Options) *Prober {
 	return &Prober{client: client, userAgent: o.UserAgent, headers: hdr, detect: o.DetectTech, maxBody: 2 << 20}
 }
 
-// Probe tries HTTPS then HTTP for a host and returns the first live result.
-func (p *Prober) Probe(ctx context.Context, host string) *core.HTTPResult {
+// corsProbeOrigin is a sentinel Origin we send to detect reflective CORS.
+const corsProbeOrigin = "https://specter-evil.example"
+
+// Probe tries HTTPS then HTTP for a host. It returns the first live result and
+// a capped body snippet (used for takeover fingerprinting); both are nil/"" if
+// the host is unreachable.
+func (p *Prober) Probe(ctx context.Context, host string) (*core.HTTPResult, string) {
 	for _, scheme := range []string{"https", "http"} {
-		if r := p.do(ctx, scheme+"://"+host); r != nil {
-			return r
+		if r, snippet := p.do(ctx, scheme+"://"+host); r != nil {
+			return r, snippet
 		}
 	}
-	return nil
+	return nil, ""
 }
 
-func (p *Prober) do(ctx context.Context, url string) *core.HTTPResult {
+func (p *Prober) do(ctx context.Context, url string) (*core.HTTPResult, string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	req.Header.Set("User-Agent", p.userAgent)
 	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Origin", corsProbeOrigin)
 	for k, v := range p.headers {
 		req.Header.Set(k, v)
 	}
@@ -87,7 +93,7 @@ func (p *Prober) do(ctx context.Context, url string) *core.HTTPResult {
 	start := time.Now()
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	defer resp.Body.Close()
 
@@ -114,8 +120,50 @@ func (p *Prober) do(ctx context.Context, url string) *core.HTTPResult {
 	if p.detect {
 		res.Technology = tech.Detect(resp.Header, body)
 	}
+	res.SecurityIssues = securityIssues(resp.Header, res.Scheme)
+	res.CORS = corsIssue(resp.Header)
 	res.Favicon = p.favicon(ctx, res.Scheme+"://"+host(url))
-	return res
+
+	snippet := body
+	if len(snippet) > 8192 {
+		snippet = snippet[:8192]
+	}
+	return res, snippet
+}
+
+// securityIssues reports missing/weak response security headers.
+func securityIssues(h http.Header, scheme string) []string {
+	var issues []string
+	if scheme == "https" && h.Get("Strict-Transport-Security") == "" {
+		issues = append(issues, "missing HSTS")
+	}
+	if h.Get("Content-Security-Policy") == "" {
+		issues = append(issues, "missing CSP")
+	}
+	if h.Get("X-Frame-Options") == "" && !strings.Contains(strings.ToLower(h.Get("Content-Security-Policy")), "frame-ancestors") {
+		issues = append(issues, "clickjacking (no X-Frame-Options)")
+	}
+	if h.Get("X-Content-Type-Options") == "" {
+		issues = append(issues, "no X-Content-Type-Options")
+	}
+	return issues
+}
+
+// corsIssue detects reflective / wildcard CORS misconfigurations.
+func corsIssue(h http.Header) string {
+	acao := h.Get("Access-Control-Allow-Origin")
+	acac := strings.EqualFold(h.Get("Access-Control-Allow-Credentials"), "true")
+	switch {
+	case acao == corsProbeOrigin && acac:
+		return "CRITICAL: reflects arbitrary Origin with credentials"
+	case acao == corsProbeOrigin:
+		return "reflects arbitrary Origin"
+	case acao == "*" && acac:
+		return "wildcard ACAO with credentials"
+	case acao == "*":
+		return "wildcard Access-Control-Allow-Origin"
+	}
+	return ""
 }
 
 func (p *Prober) favicon(ctx context.Context, base string) string {

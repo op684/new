@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"specter/internal/core"
 )
 
 // TopPorts is a curated set of the most security-relevant TCP ports.
@@ -84,10 +86,11 @@ func ParsePorts(spec string) ([]int, error) {
 	return ports, nil
 }
 
-// Scan connect-scans a target across the given ports and returns those open.
-func Scan(ctx context.Context, target string, ports []int, workers int, timeout time.Duration) []int {
+// Scan connect-scans a target across the given ports, grabs a service banner
+// from each open port, and returns them sorted by port number.
+func Scan(ctx context.Context, target string, ports []int, workers int, timeout time.Duration) []core.PortInfo {
 	jobs := make(chan int, workers*2)
-	results := make(chan int, workers*2)
+	results := make(chan core.PortInfo, workers*2)
 	var wg sync.WaitGroup
 
 	for i := 0; i < workers; i++ {
@@ -103,10 +106,12 @@ func Scan(ctx context.Context, target string, ports []int, workers int, timeout 
 				}
 				addr := net.JoinHostPort(target, strconv.Itoa(port))
 				conn, err := d.DialContext(ctx, "tcp", addr)
-				if err == nil {
-					conn.Close()
-					results <- port
+				if err != nil {
+					continue
 				}
+				banner := grabBanner(conn, port, target, timeout)
+				conn.Close()
+				results <- core.PortInfo{Port: port, Service: Service[port], Banner: banner}
 			}
 		}()
 	}
@@ -124,12 +129,75 @@ func Scan(ctx context.Context, target string, ports []int, workers int, timeout 
 
 	go func() { wg.Wait(); close(results) }()
 
-	var open []int
-	for p := range results {
-		open = append(open, p)
+	var open []core.PortInfo
+	for pi := range results {
+		open = append(open, pi)
 	}
-	sort.Ints(open)
+	sort.Slice(open, func(i, j int) bool { return open[i].Port < open[j].Port })
 	return open
+}
+
+// grabBanner reads a short service banner. For HTTP-ish ports it sends a
+// minimal request first; otherwise it waits for a server-initiated greeting.
+func grabBanner(conn net.Conn, port int, host string, timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	if timeout > 3*time.Second {
+		deadline = time.Now().Add(3 * time.Second)
+	}
+	_ = conn.SetDeadline(deadline)
+
+	if isHTTPPort(port) {
+		fmt.Fprintf(conn, "GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: specter\r\n\r\n", host)
+	}
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil || n == 0 {
+		return ""
+	}
+	return cleanBanner(buf[:n], isHTTPPort(port))
+}
+
+func isHTTPPort(p int) bool {
+	switch p {
+	case 80, 81, 591, 2082, 2086, 2095, 3000, 5000, 7001, 8000, 8008, 8080,
+		8081, 8083, 8088, 8090, 8443, 8888, 9000, 9443, 10000, 443:
+		return true
+	}
+	return false
+}
+
+func cleanBanner(b []byte, httpMode bool) string {
+	s := string(b)
+	if httpMode {
+		// Pull the Server header / status line, not the whole body.
+		var keep []string
+		for _, line := range strings.Split(s, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				break
+			}
+			low := strings.ToLower(line)
+			if strings.HasPrefix(low, "http/") || strings.HasPrefix(low, "server:") ||
+				strings.HasPrefix(low, "x-powered-by:") || strings.HasPrefix(low, "location:") {
+				keep = append(keep, line)
+			}
+		}
+		s = strings.Join(keep, " | ")
+	}
+	s = strings.Map(func(r rune) rune {
+		if r < 32 || r > 126 {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	if len(s) > 160 {
+		s = s[:160] + "…"
+	}
+	return s
 }
 
 // Label returns "port (service)" or just the port number.

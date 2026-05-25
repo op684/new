@@ -47,7 +47,7 @@ func (w *Writer) Persist(r *core.Result) error {
 	r.Sort()
 	r.Duration = time.Since(r.StartedAt).Round(time.Millisecond).String()
 
-	var subs, resolved, live, urlsInteresting []string
+	var subs, resolved, live, urlsInteresting, takeovers []string
 	for _, a := range r.Assets {
 		subs = append(subs, a.Host)
 		if a.Resolved {
@@ -58,27 +58,49 @@ func (w *Writer) Persist(r *core.Result) error {
 			resolved = append(resolved, line)
 		}
 		if a.HTTP != nil {
-			live = append(live, fmt.Sprintf("%s [%d] [%s] [%s]",
-				a.HTTP.URL, a.HTTP.StatusCode, a.HTTP.Title, strings.Join(a.Technology, ",")))
+			line := fmt.Sprintf("%s [%d] [%s] [%s]",
+				a.HTTP.URL, a.HTTP.StatusCode, a.HTTP.Title, strings.Join(a.Technology, ","))
+			if a.HTTP.CORS != "" {
+				line += " [CORS: " + a.HTTP.CORS + "]"
+			}
+			live = append(live, line)
+		}
+		if a.Takeover != "" {
+			takeovers = append(takeovers, a.Host+" -> "+a.Takeover)
 		}
 	}
 	w.writeLines("subdomains.txt", subs)
 	w.writeLines("resolved.txt", resolved)
 	w.writeLines("live.txt", live)
+	w.writeLines("takeovers.txt", takeovers)
 	w.writeLines("urls.txt", r.URLs)
+	w.writeLines("params.txt", r.Params)
+	w.writeLines("js-files.txt", r.JSFiles)
+	w.writeLines("endpoints.txt", r.Endpoints)
+
+	var secrets []string
+	for _, s := range r.Secrets {
+		secrets = append(secrets, fmt.Sprintf("[%s] %s  (%s)", s.Type, s.Match, s.Source))
+	}
+	w.writeLines("secrets.txt", secrets)
 
 	urlsInteresting = interesting(r.URLs)
 	w.writeLines("urls-interesting.txt", urlsInteresting)
 
 	var ports []string
 	for _, a := range r.Assets {
-		if len(a.OpenPorts) > 0 {
-			labels := make([]string, len(a.OpenPorts))
-			for i, p := range a.OpenPorts {
-				labels[i] = portscan.Label(p)
-			}
-			ports = append(ports, a.Host+": "+strings.Join(labels, ", "))
+		if len(a.Ports) == 0 {
+			continue
 		}
+		var parts []string
+		for _, p := range a.Ports {
+			label := portscan.Label(p.Port)
+			if p.Banner != "" {
+				label += " (" + p.Banner + ")"
+			}
+			parts = append(parts, label)
+		}
+		ports = append(ports, a.Host+": "+strings.Join(parts, ", "))
 	}
 	w.writeLines("ports.txt", ports)
 
@@ -124,20 +146,26 @@ func interesting(urls []string) []string {
 
 // Summary prints a stylized end-of-run dashboard.
 func Summary(r *core.Result, dir string) {
-	var resolved, live, withPorts, techCount int
+	var resolved, live, withPorts, takeovers, corsIssues, secHdr int
 	codes := map[int]int{}
 	for _, a := range r.Assets {
 		if a.Resolved {
 			resolved++
 		}
-		if len(a.OpenPorts) > 0 {
+		if len(a.Ports) > 0 {
 			withPorts++
+		}
+		if a.Takeover != "" {
+			takeovers++
 		}
 		if a.HTTP != nil {
 			live++
 			codes[a.HTTP.StatusCode]++
+			if a.HTTP.CORS != "" {
+				corsIssues++
+			}
+			secHdr += len(a.HTTP.SecurityIssues)
 		}
-		techCount += len(a.Technology)
 	}
 
 	ui.Section("recon summary :: " + r.Target)
@@ -146,7 +174,13 @@ func Summary(r *core.Result, dir string) {
 	ui.KV("live http", ui.Good(strconv.Itoa(live)))
 	ui.KV("with ports", ui.Warn(strconv.Itoa(withPorts)))
 	ui.KV("urls", ui.Bold(strconv.Itoa(len(r.URLs))))
-	ui.KV("findings", ui.Warn(strconv.Itoa(len(r.Findings))))
+	ui.KV("params", ui.Bold(strconv.Itoa(len(r.Params))))
+	ui.KV("js files", ui.Bold(strconv.Itoa(len(r.JSFiles))))
+	ui.KV("endpoints", ui.Bold(strconv.Itoa(len(r.Endpoints))))
+	ui.KV("secrets", highlight(len(r.Secrets)))
+	ui.KV("takeovers", highlight(takeovers))
+	ui.KV("cors issues", highlight(corsIssues))
+	ui.KV("content hits", ui.Warn(strconv.Itoa(len(r.Findings))))
 	if len(codes) > 0 {
 		var parts []string
 		for code, n := range codes {
@@ -157,4 +191,12 @@ func Summary(r *core.Result, dir string) {
 	ui.KV("duration", ui.Accent(time.Since(r.StartedAt).Round(time.Millisecond).String()))
 	ui.KV("output", ui.Secondary(dir))
 	fmt.Println()
+}
+
+// highlight shows zero as muted and any positive count as an alarming red.
+func highlight(n int) string {
+	if n == 0 {
+		return ui.Muted("0")
+	}
+	return ui.Bad(ui.Bold(strconv.Itoa(n)))
 }

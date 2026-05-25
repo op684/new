@@ -45,6 +45,7 @@ type Config struct {
 	Tech      bool
 	Content   bool
 	URLs      bool
+	JS        bool
 	All       bool
 
 	// Wordlists / ports
@@ -68,14 +69,15 @@ TARGET:
   -l   string   file with one domain per line
 
 MODULES (enable individually, or use -all):
-  -all          run the full pipeline (passive+brute+probe+ports+tech+urls)
+  -all          run the full pipeline (passive+brute+probe+ports+tech+urls+js)
   -passive      passive subdomain enumeration (crt.sh, OTX, hackertarget, ...)
   -brute        active DNS subdomain bruteforce
-  -probe        HTTP/HTTPS liveness probing (title, status, server)
-  -ports        TCP port scan of resolved hosts
+  -probe        HTTP/HTTPS probing (title, status, sec-headers, CORS, takeover)
+  -ports        TCP port scan + service banner grabbing
   -tech         technology / stack fingerprinting
-  -urls         historical URL mining (Wayback CDX, OTX)
+  -urls         historical URL mining (Wayback CDX, OTX) + param extraction
   -content      content / directory discovery on live hosts
+  -js           deep JavaScript recon: endpoints, secrets, keys, paths
 
 TUNING:
   -t    int      concurrent workers                 (default 50)
@@ -93,7 +95,6 @@ TUNING:
 
 OUTPUT / LOOK:
   -o     string  output directory                    (default specter-out)
-  -theme string  matrix | cyberpunk | blood | ice | ghost   (default matrix)
   -json          also write machine-readable JSON
   -nc            disable colors
   -silent        suppress banner & decorative output
@@ -101,8 +102,8 @@ OUTPUT / LOOK:
   -h             show this help
 
 EXAMPLES:
-  specter -d target.com -all -theme cyberpunk -o loot/
-  specter -d target.com -passive -probe -tech -json
+  specter -d target.com -all -o loot/
+  specter -d target.com -passive -probe -js -json
   specter -l scope.txt -brute -ws subs.txt -t 100 -timeout 5s
 `
 
@@ -136,6 +137,7 @@ func Parse() (*Config, error) {
 	fs.BoolVar(&c.Tech, "tech", false, "")
 	fs.BoolVar(&c.URLs, "urls", false, "")
 	fs.BoolVar(&c.Content, "content", false, "")
+	fs.BoolVar(&c.JS, "js", false, "")
 
 	fs.IntVar(&c.Threads, "t", 50, "")
 	fs.DurationVar(&c.Timeout, "timeout", 8*time.Second, "")
@@ -151,7 +153,6 @@ func Parse() (*Config, error) {
 	fs.BoolVar(&c.FollowRedirect, "fr", false, "")
 
 	fs.StringVar(&c.OutDir, "o", "specter-out", "")
-	fs.StringVar(&c.Theme, "theme", "matrix", "")
 	fs.BoolVar(&c.JSON, "json", false, "")
 	fs.BoolVar(&c.NoColr, "nc", false, "")
 	fs.BoolVar(&c.Silent, "silent", false, "")
@@ -167,6 +168,7 @@ func Parse() (*Config, error) {
 	}
 
 	c.Headers = headers
+	c.Theme = "cyberpunk"
 	if c.UserAgent == "" {
 		c.UserAgent = "Mozilla/5.0 (Linux; Android 11; SPECTER) recon/" + banner.Version
 	}
@@ -187,7 +189,8 @@ func Parse() (*Config, error) {
 	}
 
 	if c.All {
-		c.Passive, c.BruteSubs, c.Probe, c.Ports, c.Tech, c.URLs = true, true, true, true, true, true
+		c.Passive, c.BruteSubs, c.Probe, c.Ports, c.Tech, c.URLs, c.JS =
+			true, true, true, true, true, true, true
 	}
 	// If no module selected at all, default to a sensible passive+probe+tech sweep.
 	if !c.anyModule() {
@@ -208,7 +211,7 @@ func Parse() (*Config, error) {
 }
 
 func (c *Config) anyModule() bool {
-	return c.Passive || c.BruteSubs || c.Probe || c.Ports || c.Tech || c.URLs || c.Content
+	return c.Passive || c.BruteSubs || c.Probe || c.Ports || c.Tech || c.URLs || c.Content || c.JS
 }
 
 func (c *Config) loadTargets() error {
