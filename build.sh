@@ -8,16 +8,13 @@ set -e
 mkdir -p dist
 LDFLAGS="-s -w"
 
-# build <goos> <goarch> <suffix> — builds the specter, vector and phantom binaries.
+# build <goos> <goarch> <suffix> — builds the single unified specter binary
+# (auto / recon / harvest / analyze are all subcommands of it).
 build() {
     local goos=$1 goarch=$2 sfx=$3
     echo ">> $goos/$goarch"
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
         go build -ldflags "$LDFLAGS" -o "dist/specter-$sfx" .
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-        go build -ldflags "$LDFLAGS" -o "dist/vector-$sfx" ./cmd/vector
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-        go build -ldflags "$LDFLAGS" -o "dist/phantom-$sfx" ./cmd/phantom
 }
 
 # Primary targets for the OnePlus 7 Pro (Snapdragon 855 / aarch64):

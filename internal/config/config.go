@@ -115,8 +115,8 @@ func (h *headerList) Set(v string) error {
 	return nil
 }
 
-// Parse reads os.Args and returns a validated Config.
-func Parse() (*Config, error) {
+// Parse reads the provided args and returns a validated Config.
+func Parse(args []string) (*Config, error) {
 	c := &Config{}
 	var headers headerList
 	var resolvers, matchCodes string
@@ -158,7 +158,7 @@ func Parse() (*Config, error) {
 	fs.BoolVar(&c.Silent, "silent", false, "")
 	fs.BoolVar(&showVersion, "v", false, "")
 
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
 

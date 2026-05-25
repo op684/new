@@ -74,6 +74,8 @@ func (w *Writer) Persist(r *core.Result) error {
 	w.writeLines("live.txt", live)
 	w.writeLines("takeovers.txt", takeovers)
 	w.writeLines("urls.txt", r.URLs)
+	w.writeLines("cloud-assets.txt", r.Cloud)
+	w.writeLines("ipv4.txt", r.IPv4)
 	w.writeLines("params.txt", r.Params)
 	w.writeLines("js-files.txt", r.JSFiles)
 	w.writeLines("endpoints.txt", r.Endpoints)

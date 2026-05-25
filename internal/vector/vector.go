@@ -1,11 +1,11 @@
-// VECTOR — SPECTER's endpoint attack-surface analyzer.
+// Package vector is SPECTER's endpoint attack-surface analyzer.
 //
 // It ingests an endpoints list (e.g. SPECTER's endpoints.txt), classifies every
 // endpoint, and flags likely vulnerability classes (SSRF, SQLi, LFI, RCE, IDOR,
 // open-redirect, secrets-in-URL, sensitive files, …) ranked by risk. With
-// -probe it verifies endpoints live; with -active it injects benign canaries to
-// confirm reflection (XSS surface) and open redirects.
-package main
+// -probe it verifies endpoints live; with -active/-sqli/-lfi it injects payloads
+// to confirm reflection, open redirects, SQL injection and LFI.
+package vector
 
 import (
 	"bufio"
@@ -94,8 +94,9 @@ type options struct {
 	silent  bool
 }
 
-func main() {
-	opt, showVer := parseFlags()
+// Run is the `specter analyze` subcommand entry point.
+func Run(args []string) {
+	opt, showVer := parseFlags(args)
 	if showVer {
 		fmt.Printf("vector v%s\n", version)
 		return
@@ -148,7 +149,7 @@ func main() {
 	}
 }
 
-func parseFlags() (options, bool) {
+func parseFlags(args []string) (options, bool) {
 	var opt options
 	var showVer bool
 	fs := flag.NewFlagSet("vector", flag.ContinueOnError)
@@ -174,7 +175,7 @@ func parseFlags() (options, bool) {
 	fs.BoolVar(&opt.silent, "silent", false, "")
 	fs.BoolVar(&showVer, "v", false, "")
 
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 	if attack {
@@ -463,6 +464,13 @@ func printEndpoint(e *epanalyze.Endpoint) {
 }
 
 // ---- output files ----
+
+// WriteReport persists VECTOR's categorized analysis files (exported for the
+// auto pipeline).
+func WriteReport(dir string, res *epanalyze.Result) { writeReport(dir, res) }
+
+// PrintEndpoint renders a single analyzed endpoint (exported for auto).
+func PrintEndpoint(e *epanalyze.Endpoint) { printEndpoint(e) }
 
 func writeReport(dir string, res *epanalyze.Result) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {

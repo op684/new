@@ -77,6 +77,8 @@ type Result struct {
 	JSFiles   []string  `json:"js_files,omitempty"`
 	Endpoints []string  `json:"endpoints,omitempty"`
 	Secrets   []Secret  `json:"secrets,omitempty"`
+	Cloud     []string  `json:"cloud_assets,omitempty"`
+	IPv4      []string  `json:"ipv4,omitempty"`
 
 	mu    sync.Mutex
 	index map[string]*Asset

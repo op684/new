@@ -1,10 +1,9 @@
-// PHANTOM — JS-aware subdomain, secret & cloud-asset harvester.
-//
-// A Go reimplementation and upgrade of SubDomainizer: it mines subdomains,
-// secrets/credentials, cloud-storage URLs and IPv4s from a page's inline and
-// external JavaScript (plus source maps), local folders, GitHub code search,
-// and TLS Subject Alternative Names.
-package main
+// Package phantom is SPECTER's JS-aware subdomain, secret & cloud-asset
+// harvester — a Go reimplementation and upgrade of SubDomainizer. It mines
+// subdomains, secrets, cloud-storage URLs and IPv4s from inline/external
+// JavaScript (plus source maps), local folders, GitHub code search, and TLS
+// Subject Alternative Names.
+package phantom
 
 import (
 	"bufio"
@@ -109,8 +108,9 @@ type options struct {
 	nc, silent         bool
 }
 
-func main() {
-	opt, showVer := parseFlags()
+// Run is the `specter harvest` subcommand entry point.
+func Run(args []string) {
+	opt, showVer := parseFlags(args)
 	if showVer {
 		fmt.Printf("phantom v%s\n", version)
 		return
@@ -165,7 +165,7 @@ func main() {
 	writeOutputs(opt, res)
 }
 
-func parseFlags() (options, bool) {
+func parseFlags(args []string) (options, bool) {
 	var opt options
 	var showVer bool
 	fs := flag.NewFlagSet("phantom", flag.ContinueOnError)
@@ -195,7 +195,7 @@ func parseFlags() (options, bool) {
 	fs.BoolVar(&opt.silent, "silent", false, "")
 	fs.BoolVar(&showVer, "v", false, "")
 
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 	if opt.threads < 1 {
