@@ -17,6 +17,7 @@ import (
 
 	"specter/internal/auto"
 	"specter/internal/banner"
+	"specter/internal/inspect"
 	"specter/internal/phantom"
 	"specter/internal/recon"
 	"specter/internal/ui"
@@ -40,6 +41,8 @@ func main() {
 		phantom.Run(rest)
 	case "analyze", "an", "vector":
 		vector.Run(rest)
+	case "inspect", "i":
+		inspect.Run(rest)
 	case "version", "-v", "--version":
 		fmt.Printf("specter v%s\n", banner.Version)
 	case "help", "-h", "--help":
@@ -65,6 +68,7 @@ COMMANDS:
   recon      subdomain enumeration, resolution, probing, urls, js, content
   harvest    JS/secret/cloud/SAN/GitHub harvesting (SubDomainizer, upgraded)
   analyze    endpoint attack-surface analysis + active SQLi/LFI/XSS probing
+  inspect    deep per-URL intelligence on a high-risk.txt (headers, TLS, leaks…)
   version    print version
   help       show this help
 
