@@ -8,21 +8,24 @@ set -e
 mkdir -p dist
 LDFLAGS="-s -w"
 
+# build <goos> <goarch> <suffix> — builds both the specter and vector binaries.
 build() {
-    local goos=$1 goarch=$2 out=$3
-    echo ">> $goos/$goarch -> dist/$out"
+    local goos=$1 goarch=$2 sfx=$3
+    echo ">> $goos/$goarch"
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-        go build -ldflags "$LDFLAGS" -o "dist/$out" .
+        go build -ldflags "$LDFLAGS" -o "dist/specter-$sfx" .
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+        go build -ldflags "$LDFLAGS" -o "dist/vector-$sfx" ./cmd/vector
 }
 
 # Primary targets for the OnePlus 7 Pro (Snapdragon 855 / aarch64):
-build android arm64 specter-android-arm64
-build linux   arm64 specter-linux-arm64
+build android arm64 android-arm64
+build linux   arm64 linux-arm64
 
 # Handy extras:
-build linux   amd64 specter-linux-amd64
-build darwin  arm64 specter-darwin-arm64
-build windows amd64 specter-windows-amd64.exe
+build linux   amd64 linux-amd64
+build darwin  arm64 darwin-arm64
+build windows amd64 windows-amd64.exe
 
 echo
 echo "done. binaries:"

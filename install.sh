@@ -45,19 +45,26 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 ok "go: $(go version)"
 
-# 3. Build (native arch).
+# 3. Build both binaries (native arch).
 say "building specter (this can take a minute on mobile)…"
-CGO_ENABLED=0 go build -ldflags "-s -w" -o specter . || die "build failed"
-ok "binary built: $(du -h specter | cut -f1)"
+CGO_ENABLED=0 go build -ldflags "-s -w" -o specter . || die "specter build failed"
+ok "specter built: $(du -h specter | cut -f1)"
+
+say "building vector (endpoint analyzer)…"
+CGO_ENABLED=0 go build -ldflags "-s -w" -o vector ./cmd/vector || die "vector build failed"
+ok "vector built: $(du -h vector | cut -f1)"
 
 # 4. Install.
-install -m 0755 specter "$BIN/specter" 2>/dev/null || cp specter "$BIN/specter"
-chmod +x "$BIN/specter"
-ok "installed to $BIN/specter"
+for b in specter vector; do
+    install -m 0755 "$b" "$BIN/$b" 2>/dev/null || cp "$b" "$BIN/$b"
+    chmod +x "$BIN/$b"
+    ok "installed $BIN/$b"
+done
 
 # 5. Verify.
 if command -v specter >/dev/null 2>&1; then
-    ok "ready! run:  specter -d target.com -all -theme cyberpunk"
+    ok "ready! recon:    specter -d target.com -all"
+    ok "      analyze:  vector  -i specter-out/target.com/endpoints.txt -min high"
 else
-    warn "add $BIN to your PATH, then run: specter -h"
+    warn "add $BIN to your PATH, then run: specter -h  /  vector -h"
 fi

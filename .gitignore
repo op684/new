@@ -1,6 +1,8 @@
 # Build artifacts
 /specter
 /specter-*
+/vector
+/vector-*
 /dist/
 
 # Recon output (loot)
