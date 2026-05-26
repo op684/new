@@ -57,10 +57,10 @@ ok "installed $BIN/specter"
 
 # 5. Verify.
 if command -v specter >/dev/null 2>&1; then
-    ok "ready! one command does it all:"
-    ok "    specter auto -d target.com -o loot/"
-    ok "    specter auto -d target.com -deep -attack    (max coverage + vuln probing)"
-    ok "  individual stages: specter recon|harvest|analyze|inspect  (see: specter help)"
+    ok "ready! just run 'specter' (no args) for the tap-to-pick menu"
+    ok "    or: specter auto -d target.com -o loot/"
+    ok "    or: specter auto -d target.com -deep -attack   (max coverage + vuln probing)"
+    ok "  stages: specter recon|harvest|analyze|inspect    (see: specter help)"
 else
-    warn "add $BIN to your PATH, then run: specter help"
+    warn "add $BIN to your PATH, then run: specter"
 fi

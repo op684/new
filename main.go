@@ -18,6 +18,7 @@ import (
 	"specter/internal/auto"
 	"specter/internal/banner"
 	"specter/internal/inspect"
+	"specter/internal/menu"
 	"specter/internal/phantom"
 	"specter/internal/recon"
 	"specter/internal/ui"
@@ -25,14 +26,23 @@ import (
 )
 
 func main() {
+	// Bare `specter` on a terminal launches the interactive menu (tap a number,
+	// no flags to memorize); piped/non-TTY falls back to help.
 	if len(os.Args) < 2 {
-		rootHelp()
-		os.Exit(1)
+		ui.Init("cyberpunk", false)
+		if ui.Interactive() {
+			menu.Run()
+		} else {
+			rootHelp()
+		}
+		return
 	}
 	sub := os.Args[1]
 	rest := os.Args[2:]
 
 	switch strings.ToLower(sub) {
+	case "menu", "tui", "ui", "m":
+		menu.Run()
 	case "auto", "a":
 		auto.Run(rest)
 	case "recon", "r":
@@ -63,6 +73,8 @@ USAGE:
   specter <command> [options]
 
 COMMANDS:
+  menu       interactive menu — pick options by number, no flags to type
+             (just run 'specter' with no arguments to open it)
   auto       full automated pipeline: recon → harvest → analyze, chained
              (best starting point — one command does everything)
   recon      subdomain enumeration, resolution, probing, urls, js, content

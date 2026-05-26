@@ -259,6 +259,14 @@ func ClearLine() {
 	fmt.Print("\r\x1b[K")
 }
 
+// ClearScreen clears the terminal and homes the cursor (TTY only).
+func ClearScreen() {
+	if !interactive || !enabled {
+		return
+	}
+	fmt.Print("\x1b[2J\x1b[H")
+}
+
 // Muted2 prints a full muted line (printf-style).
 func Muted2(format string, a ...any) {
 	fmt.Println(Muted(fmt.Sprintf(format, a...)))
