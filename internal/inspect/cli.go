@@ -33,18 +33,20 @@ const art = `
 
 const usage = `specter inspect — deep per-URL intelligence gatherer
 
-Feeds on VECTOR's high-risk.txt (or any URL list) and extracts everything it
-can from each URL: redirect chain, headers, security-header & cookie gaps,
-CORS, allowed methods, TLS certificate, tech fingerprint, body intelligence
-(secrets, endpoints, emails, internal IPs, stack traces, directory listings,
-WAF), reflected parameters, GraphQL introspection and exposed backups.
+Scans ANY list of URLs or hosts (VECTOR's high-risk.txt, live.txt, subdomains,
+a plain url list, or piped stdin) and extracts everything it can from each:
+redirect chain, headers, security-header & cookie gaps, CORS, allowed methods,
+TLS certificate, tech fingerprint, body intelligence (secrets, endpoints,
+emails, internal IPs, stack traces, directory listings, WAF), reflected
+parameters, GraphQL introspection and exposed backups.
 
 USAGE:
-  specter inspect -i high-risk.txt
-  cat high-risk.txt | specter inspect -min high -o loot/
+  specter inspect -i urls.txt
+  specter inspect -i high-risk.txt -min high -o loot/
+  cat live.txt | specter inspect
 
 INPUT:
-  -i    string   input file (VECTOR high-risk.txt or plain URLs); stdin if omitted
+  -i    string   file of URLs/hosts (any list; bare hosts get https://); stdin if omitted
 
 CHECKS (authorized targets only):
   -backups       probe for exposed backup/source variants     (default true)
@@ -68,8 +70,8 @@ OUTPUT:
 
 EXAMPLES:
   specter inspect -i loot/target.com/high-risk.txt -o loot/target.com/
-  specter inspect -i high-risk.txt -min medium -t 30
-  specter inspect -i high-risk.txt -backups=false -reflect=false
+  specter inspect -i loot/target.com/subdomains.txt -min medium -t 30
+  specter inspect -i urls.txt -backups=false -reflect=false
 `
 
 type headerList []string
@@ -97,7 +99,33 @@ type cliOpts struct {
 	silent   bool
 }
 
-var lineRX = regexp.MustCompile(`^\s*(?:\[\s*([A-Za-z]+)\s+risk:(\d+)\s*\]\s*)?(https?://\S+)`)
+// lineRX accepts an optional VECTOR "[SEV risk:N]" prefix, then the first
+// token on the line (a URL, or a bare host/domain which we upgrade to https).
+var lineRX = regexp.MustCompile(`^\s*(?:\[\s*([A-Za-z]+)\s+risk:(\d+)\s*\]\s*)?(\S+)`)
+
+// normalizeURL turns a token into a scannable absolute URL, or "" if it isn't
+// a host/URL (e.g. a bare path with no host).
+func normalizeURL(tok string) string {
+	tok = strings.Trim(tok, `"'`+"`")
+	if tok == "" {
+		return ""
+	}
+	if strings.HasPrefix(tok, "http://") || strings.HasPrefix(tok, "https://") {
+		return tok
+	}
+	if strings.HasPrefix(tok, "//") {
+		return "https:" + tok
+	}
+	// Bare host/domain (optionally with a path): require a dot before any slash.
+	hostPart := tok
+	if i := strings.IndexByte(hostPart, '/'); i >= 0 {
+		hostPart = hostPart[:i]
+	}
+	if hostPart == "" || !strings.Contains(hostPart, ".") || strings.ContainsAny(hostPart, " @") {
+		return ""
+	}
+	return "https://" + tok
+}
 
 // Run is the `specter inspect` subcommand entry point.
 func Run(args []string) {
@@ -113,7 +141,7 @@ func Run(args []string) {
 
 	targets := readTargets(opt.in)
 	if len(targets) == 0 {
-		ui.Error("no URLs found in input (expects VECTOR high-risk.txt or a URL list)")
+		ui.Error("no URLs/hosts found in input (any list of URLs or domains works)")
 		os.Exit(1)
 	}
 	ui.Info("loaded %s URLs from %s", ui.Bold(strconv.Itoa(len(targets))), src(opt.in))
@@ -237,8 +265,8 @@ func readTargets(in string) []*Target {
 		if m == nil {
 			continue
 		}
-		u := m[3]
-		if seen[u] {
+		u := normalizeURL(m[3])
+		if u == "" || seen[u] {
 			continue
 		}
 		seen[u] = true
