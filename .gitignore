@@ -1,0 +1,7 @@
+build/
+zygisk/*.so
+mcpe_modmenu.zip
+.cache/
+.idea/
+.vscode/
+compile_commands.json

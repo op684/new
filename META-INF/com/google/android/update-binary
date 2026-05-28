@@ -1,0 +1,14 @@
+#!/sbin/sh
+umask 022
+OUTFD=$2
+ZIPFILE=$3
+
+mount /data 2>/dev/null
+
+[ -f /data/adb/magisk/util_functions.sh ] || {
+  echo "! Magisk not installed"
+  exit 1
+}
+. /data/adb/magisk/util_functions.sh
+install_module
+exit 0

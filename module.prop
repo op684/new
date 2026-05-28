@@ -1,0 +1,7 @@
+id=mcpe_modmenu
+name=MCPE Mod Menu
+version=v0.1.0
+versionCode=1
+author=op684
+description=Zygisk-injected mod menu for Minecraft Bedrock (xray, chest finder, nuker). arm64-v8a only.
+updateJson=
