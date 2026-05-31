@@ -48,6 +48,9 @@ uv sync
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
+
+# optional: enable the OCR fallback (also needs the tesseract engine)
+pip install -e ".[ocr]"
 ```
 
 Verify ADB sees the phone and root works:
@@ -155,6 +158,40 @@ it** — see the screen, read the UI, and tap things by name.
 | `current_app` | Which app/activity is in the foreground |
 | `screenshot` | Capture the screen as a PNG (only when you need pixels) |
 
+### OCR fallback (read canvas / secure screens)
+
+When the accessibility tree comes back empty — canvas/game UIs, some Flutter
+views, DRM video, `FLAG_SECURE` screens — OCR reads the **pixels** instead.
+
+| Tool | What it does |
+|------|--------------|
+| `ocr_status` | Check OCR is installed (Python deps + tesseract engine) |
+| `ocr_screen` | OCR the screen → readable lines (optionally with word coordinates) |
+| `ocr_tap` | OCR the screen, find a word/phrase, and tap it |
+
+OCR is **optional**. Enable it with:
+
+```bash
+pip install "android-mcp[ocr]"          # pytesseract + pillow
+# plus the engine:
+sudo apt install tesseract-ocr          # Debian/Ubuntu
+brew install tesseract                  # macOS
+```
+
+The core server runs fine without it; the OCR tools just report that it's not
+installed until you add the extra.
+
+### Act and see automatically (watch)
+
+These tap *and* wait for the resulting screen to settle, then read it back — so
+the AI "sees" the new screen without a separate call.
+
+| Tool | What it does |
+|------|--------------|
+| `tap_text_and_read` | Tap an element by name, wait for the UI to settle, return the new screen |
+| `tap_and_read` | Same, tapping exact coordinates |
+| `wait_for_change` | Wait until the screen changes from now & settles, then read it |
+
 ### Touch & gestures
 
 | Tool | What it does |
@@ -249,6 +286,12 @@ A typical interaction mirrors how a person uses a phone:
 4. `wait` — let the screen settle.
 5. repeat: look → act → look.
 
+**Shortcut:** `tap_text_and_read` collapses steps 3–5 into one — it taps, waits
+for the screen to settle, and returns the new reading automatically, so the AI
+sees the result without you asking. Use `wait_for_change` after an action whose
+effect is delayed (a load, a network call). And if a reader comes back empty,
+drop to `ocr_screen` / `ocr_tap` to read the pixels directly.
+
 ### Example prompts
 
 - "Unlock my phone (PIN 1234), open Chrome, search for the weather, and tell me
@@ -261,7 +304,8 @@ A typical interaction mirrors how a person uses a phone:
 
 ## Testing
 
-Pure-logic tests for the ADB wrapper and the UI-hierarchy parser (no device needed):
+Pure-logic tests for the ADB wrapper, the UI-hierarchy parser, and the OCR
+helpers (no device or tesseract needed):
 
 ```bash
 cd android-mcp

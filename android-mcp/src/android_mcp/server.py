@@ -4,7 +4,8 @@ Runs on a host with ``adb`` installed; the phone (a rooted OnePlus 7 Pro) is
 attached over USB or wireless ADB. The toolset is designed so the model can use
 the phone *as if it were holding it*:
 
-* See      – screenshots + a parsed UI hierarchy (tap things by name)
+* See      – UI-tree readers (tap by name), screenshots, OCR fallback
+* Watch    – act-and-read tools that wait for the screen to settle, then read it
 * Touch    – tap, long-press, double-tap, swipe, drag, scroll, pinch/zoom
 * Type     – text entry, clear, paste, type-and-enter
 * Navigate – home/back/recents, notifications & quick-settings shades
@@ -34,7 +35,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from pydantic import Field
 
-from . import ui
+from . import ocr, ui
 from .adb import Adb, AdbError
 
 mcp = FastMCP(
@@ -43,10 +44,13 @@ mcp = FastMCP(
         "Human-like control of a rooted Android device (OnePlus 7 Pro) via ADB. "
         "Workflow: call `device_status` once to confirm the phone is attached, "
         "rooted, and awake (use `wake`/`unlock` if not). To interact with the "
-        "UI, prefer `screen_elements` to SEE what's on screen, then act with "
-        "`tap_text`/`tap_id` (tap by name, not pixels). Use `screenshot` when "
-        "you need to look at pixels. Fall back to `shell`/`root_shell` for "
-        "anything not covered by a dedicated tool."
+        "UI, prefer `screen_elements`/`screen_text` to SEE what's on screen, "
+        "then act with `tap_text`/`tap_id` (tap by name, not pixels). Use "
+        "`tap_text_and_read`/`tap_and_read` to act and automatically read the "
+        "resulting screen in one step, and `wait_for_change` after a delayed "
+        "action. If the readers come back empty (canvas/secure screens), fall "
+        "back to `ocr_screen`/`ocr_tap`. Use `shell`/`root_shell` for anything "
+        "not covered by a dedicated tool."
     ),
 )
 
@@ -172,13 +176,93 @@ def get_screen_size() -> str:
 # --------------------------------------------------------------------------- #
 # Seeing the screen
 # --------------------------------------------------------------------------- #
-@mcp.tool()
-def screenshot() -> Image:
-    """Capture the current screen as a PNG image (look at the phone with your eyes)."""
+def _screencap_png() -> bytes:
+    """Grab the current screen as raw PNG bytes."""
     proc = adb.raw(["exec-out", "screencap", "-p"], binary=True)
     if proc.returncode != 0:
         raise AdbError((proc.stderr or b"").decode(errors="replace") or "screencap failed")
-    return Image(data=proc.stdout, format="png")
+    return proc.stdout
+
+
+@mcp.tool()
+def screenshot() -> Image:
+    """Capture the current screen as a PNG image (look at the phone with your eyes)."""
+    return Image(data=_screencap_png(), format="png")
+
+
+@mcp.tool()
+def ocr_status() -> str:
+    """Check whether OCR is available (Python deps + the tesseract engine)."""
+    ok, detail = ocr.available()
+    return f"OCR available: {detail}" if ok else f"OCR NOT available — {detail}"
+
+
+@mcp.tool()
+def ocr_screen(
+    min_confidence: Annotated[float, Field(description="Drop words below this OCR confidence (0–100)")] = 40.0,
+    with_coords: Annotated[bool, Field(description="Also list each word with its tap coordinates")] = False,
+) -> str:
+    """Read on-screen text by OCR'ing a screenshot — the last-resort reader.
+
+    Use this when `screen_text`/`screen_elements` come back empty or sparse,
+    which happens on canvas/game-engine UIs, some Flutter views, DRM video, and
+    FLAG_SECURE screens that hide themselves from the accessibility tree. OCR
+    works on raw pixels, so it sees what the eye sees. With `with_coords`, each
+    word is listed with a centre point you can pass to `tap`.
+    """
+    ok, detail = ocr.available()
+    if not ok:
+        return f"OCR not available — {detail}"
+    try:
+        png = _screencap_png()
+    except AdbError as exc:
+        return _err(exc)
+    try:
+        words = ocr.recognize_words(png, min_confidence=min_confidence)
+    except RuntimeError as exc:
+        return f"OCR error: {exc}"
+    if not words:
+        return "OCR found no text on screen."
+    lines = ocr.group_lines(words)
+    out = "\n".join(lines)
+    if with_coords:
+        coord_lines = [f"  {w.text!r} @ ({w.center[0]},{w.center[1]}) conf={w.confidence:.0f}" for w in words]
+        out += "\n\n[words with coordinates]\n" + "\n".join(coord_lines)
+    return out
+
+
+@mcp.tool()
+def ocr_tap(
+    text: Annotated[str, Field(description="Visible word/phrase to find via OCR and tap")],
+) -> str:
+    """OCR the screen, find a word/phrase by its pixels, and tap it.
+
+    The fallback to `tap_text` for screens the accessibility tree can't read.
+    Matches the first OCR'd word containing `text` (case-insensitive); for a
+    multi-word phrase, matches the first word of the phrase.
+    """
+    ok, detail = ocr.available()
+    if not ok:
+        return f"OCR not available — {detail}"
+    try:
+        png = _screencap_png()
+    except AdbError as exc:
+        return _err(exc)
+    try:
+        words = ocr.recognize_words(png)
+    except RuntimeError as exc:
+        return f"OCR error: {exc}"
+    needle = text.strip().lower()
+    first = needle.split()[0] if needle.split() else needle
+    match = next((w for w in words if needle in w.text.lower() or first in w.text.lower()), None)
+    if not match:
+        return f"OCR could not find {text!r} on screen."
+    cx, cy = match.center
+    try:
+        _tap(cx, cy)
+    except AdbError as exc:
+        return _err(exc)
+    return f"OCR-tapped {match.text!r} @ ({cx},{cy})."
 
 
 @mcp.tool()
@@ -196,14 +280,7 @@ def screen_elements(
         elements, err = _get_elements()
         if err:
             return err
-        if interactive_only:
-            elements = ui.interactive(elements)
-        if not elements:
-            return "No elements found on screen."
-        shown = elements[:limit]
-        body = "\n".join(e.describe(i) for i, e in enumerate(shown))
-        more = f"\n… and {len(elements) - len(shown)} more (raise `limit`)." if len(elements) > limit else ""
-        return body + more
+        return _format_screen(elements, interactive_only=interactive_only, limit=limit)
     except AdbError as exc:
         return _err(exc)
 
@@ -1070,6 +1147,125 @@ def root_shell(
     """Run an arbitrary command as root (uid 0) via `su -c`. Requires a rooted device."""
     try:
         return adb.root_shell(command).text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+def _format_screen(elements: list[ui.Element], *, interactive_only: bool = True, limit: int = 80) -> str:
+    """Render a list of elements the way `screen_elements` does."""
+    els = ui.interactive(elements) if interactive_only else elements
+    if not els:
+        return "No elements found on screen."
+    shown = els[:limit]
+    body = "\n".join(e.describe(i) for i, e in enumerate(shown))
+    more = f"\n… and {len(els) - len(shown)} more (raise `limit`)." if len(els) > limit else ""
+    return body + more
+
+
+def _settle(
+    *, baseline: str | None, timeout: float, poll: float = 0.4, stable_for: float = 0.6
+) -> tuple[list[ui.Element], str, bool]:
+    """Poll the UI tree until it changes from ``baseline`` and then holds steady.
+
+    Returns (elements, signature, changed). ``changed`` is False if we timed out
+    without ever differing from the baseline (the screen never moved).
+    """
+    deadline = time.monotonic() + max(0.5, timeout)
+    last_sig: str | None = None
+    stable_since: float | None = None
+    changed = baseline is None
+    elements: list[ui.Element] = []
+    sig = baseline or ""
+    while time.monotonic() < deadline:
+        elements, err = _get_elements()
+        if err:
+            time.sleep(poll)
+            continue
+        sig = ui.signature(elements)
+        if baseline is not None and sig != baseline:
+            changed = True
+        # Once we've changed (or had no baseline), wait for two equal reads.
+        if changed:
+            if sig == last_sig:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= stable_for:
+                    break
+            else:
+                stable_since = None
+        last_sig = sig
+        time.sleep(poll)
+    return elements, sig, changed
+
+
+@mcp.tool()
+def wait_for_change(
+    timeout: Annotated[float, Field(description="Max seconds to wait for the screen to change & settle")] = 6.0,
+    interactive_only: Annotated[bool, Field(description="Only show tappable/text-bearing elements")] = True,
+    limit: Annotated[int, Field(description="Max elements to return")] = 80,
+) -> str:
+    """Wait until the screen changes from right now and settles, then read it.
+
+    Snapshots the current UI signature, then polls until the screen differs and
+    stops moving (animations/loads finished), and returns the new
+    `screen_elements` view. Use after an action whose effect is delayed.
+    """
+    try:
+        before, err = _get_elements()
+        if err:
+            return err
+        baseline = ui.signature(before)
+        elements, _sig, changed = _settle(baseline=baseline, timeout=timeout)
+        header = "Screen changed and settled:\n" if changed else "(no change detected within timeout)\n"
+        return header + _format_screen(elements, interactive_only=interactive_only, limit=limit)
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def tap_text_and_read(
+    text: Annotated[str, Field(description="Visible text/description of the element to tap")],
+    exact: Annotated[bool, Field(description="Require an exact match instead of substring")] = False,
+    timeout: Annotated[float, Field(description="Max seconds to wait for the resulting screen to settle")] = 6.0,
+) -> str:
+    """Tap an element by name, then automatically wait for and read the new screen.
+
+    This is the "act and see" tool — it taps, waits for the UI to react and
+    settle, and returns the resulting `screen_elements` so you immediately know
+    what happened without a separate read.
+    """
+    try:
+        before, err = _get_elements()
+        if err:
+            return err
+        baseline = ui.signature(before)
+        matches = ui.find(before, text, exact=exact, clickable_only=True)
+        if not matches:
+            return f"No element matching '{text}'. Call `screen_elements` to see what's available."
+        cx, cy = matches[0].center
+        _tap(cx, cy)
+        elements, _sig, changed = _settle(baseline=baseline, timeout=timeout)
+        note = "" if changed else " (screen did not visibly change)"
+        header = f"Tapped {matches[0].label!r} @ ({cx},{cy}).{note}\nNow showing:\n"
+        return header + _format_screen(elements)
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def tap_and_read(
+    x: Annotated[int, Field(description="X pixel")],
+    y: Annotated[int, Field(description="Y pixel")],
+    timeout: Annotated[float, Field(description="Max seconds to wait for the resulting screen to settle")] = 6.0,
+) -> str:
+    """Tap at coordinates, then automatically wait for and read the new screen."""
+    try:
+        before, err = _get_elements()
+        baseline = ui.signature(before) if not err else None
+        _tap(x, y)
+        elements, _sig, changed = _settle(baseline=baseline, timeout=timeout)
+        note = "" if changed else " (screen did not visibly change)"
+        return f"Tapped ({x},{y}).{note}\nNow showing:\n" + _format_screen(elements)
     except AdbError as exc:
         return _err(exc)
 

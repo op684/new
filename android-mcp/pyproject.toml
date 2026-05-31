@@ -9,6 +9,14 @@ dependencies = [
     "mcp[cli]>=1.2.0",
 ]
 
+[project.optional-dependencies]
+# OCR fallback for canvas/secure screens. Also needs the tesseract engine,
+# e.g. `apt install tesseract-ocr` or `brew install tesseract`.
+ocr = [
+    "pytesseract>=0.3.10",
+    "pillow>=10.0.0",
+]
+
 [project.scripts]
 android-mcp = "android_mcp.server:main"
 

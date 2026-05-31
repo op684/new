@@ -142,6 +142,29 @@ class UITestCase(unittest.TestCase):
     def test_parse_tree_malformed_returns_empty(self):
         self.assertEqual(ui.parse_tree("nope <<"), [])
 
+    # -- screen signature (change detection) ------------------------------
+
+    def test_signature_stable_for_same_screen(self):
+        a = ui.signature(self.elements)
+        b = ui.signature(ui.parse_hierarchy(SAMPLE))
+        self.assertEqual(a, b)
+
+    def test_signature_differs_when_text_changes(self):
+        changed = SAMPLE.replace("Settings", "Settings Changed")
+        self.assertNotEqual(ui.signature(self.elements), ui.signature(ui.parse_hierarchy(changed)))
+
+    def test_signature_differs_when_element_count_changes(self):
+        fewer = ui.parse_hierarchy(
+            '<hierarchy><node text="Only" bounds="[0,0][1,1]"/></hierarchy>'
+        )
+        self.assertNotEqual(ui.signature(self.elements), ui.signature(fewer))
+
+    def test_signature_format(self):
+        sig = ui.signature(self.elements)
+        count, _, digest = sig.partition(":")
+        self.assertEqual(int(count), len(self.elements))
+        self.assertTrue(digest)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

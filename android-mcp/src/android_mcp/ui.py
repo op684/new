@@ -203,3 +203,21 @@ def find(elements: list[Element], query: str, *, exact: bool = False,
 def find_by_id(elements: list[Element], resource_id: str) -> list[Element]:
     rid = resource_id.lower()
     return [e for e in elements if e.resource_id and rid in e.resource_id.lower()]
+
+
+def signature(elements: list[Element]) -> str:
+    """A short, stable fingerprint of what's on screen.
+
+    Two dumps of the *same* screen produce the same signature; a navigation,
+    dialog, or content change produces a different one. Used to detect when the
+    UI has settled after an action. Based on each element's id/text/desc and
+    bounds, which together capture both layout and content.
+    """
+    import hashlib
+
+    parts = [
+        f"{e.resource_id}|{e.text}|{e.content_desc}|{e.bounds}"
+        for e in elements
+    ]
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8", "replace")).hexdigest()
+    return f"{len(elements)}:{digest[:16]}"
