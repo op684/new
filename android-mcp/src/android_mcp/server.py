@@ -1,42 +1,52 @@
-"""MCP server exposing full control of a rooted Android device over ADB.
+"""MCP server giving a model human-like control of a rooted Android device.
 
-Designed for a personal, rooted OnePlus 7 Pro (or any rooted Android device).
-The server runs on a host machine with ``adb`` installed and the phone attached
-over USB or wireless ADB. Tools fall into a few groups:
+Runs on a host with ``adb`` installed; the phone (a rooted OnePlus 7 Pro) is
+attached over USB or wireless ADB. The toolset is designed so the model can use
+the phone *as if it were holding it*:
 
-* Connection & info   – list devices, connect wirelessly, device properties
-* Shell               – run arbitrary commands as the shell user or as root
-* UI automation       – tap, swipe, type text, send key events, screenshots
-* App management       – list / launch / stop / install / uninstall apps
-* Files               – push, pull, read, write (root) files on the device
-* Diagnostics & power  – logcat, reboot
+* See      – screenshots + a parsed UI hierarchy (tap things by name)
+* Touch    – tap, long-press, double-tap, swipe, drag, scroll, pinch/zoom
+* Type     – text entry, clear, paste, type-and-enter
+* Navigate – home/back/recents, notifications & quick-settings shades
+* Screen   – wake/sleep, unlock (with PIN), rotate, brightness, screen size
+* Apps     – list/launch/stop/install/uninstall, current foreground app
+* Comms    – open URLs, dial/call, compose SMS, arbitrary intents
+* System   – Wi-Fi/Bluetooth/airplane/mobile-data toggles, battery, clipboard
+* Files    – push/pull, root read/write
+* Capture  – screenshot, screen recording, logcat
+* Shell    – arbitrary commands as the shell user or as root
+* Power    – reboot
 
-Every privileged action ultimately routes through ``su`` so, on a rooted
-device, the model has unrestricted access. Treat this server accordingly:
-only expose it to clients you trust, and only point it at devices you own.
+Everything privileged routes through ``su``. Only point this at a device you
+own and only connect it to an MCP client you trust.
 """
 
 from __future__ import annotations
 
 import base64
 import os
+import re
 import shlex
+import time
 from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from pydantic import Field
 
+from . import ui
 from .adb import Adb, AdbError
 
 mcp = FastMCP(
     "android-control",
     instructions=(
-        "Full control of a rooted Android device (OnePlus 7 Pro) via ADB. "
-        "Use `device_status` first to confirm a device is attached and rooted. "
-        "Prefer `root_shell` for system-level changes; `shell` for ordinary "
-        "commands. UI automation tools (tap/swipe/input_text/keyevent) operate "
-        "in screen coordinates — capture a `screenshot` first to see the layout."
+        "Human-like control of a rooted Android device (OnePlus 7 Pro) via ADB. "
+        "Workflow: call `device_status` once to confirm the phone is attached, "
+        "rooted, and awake (use `wake`/`unlock` if not). To interact with the "
+        "UI, prefer `screen_elements` to SEE what's on screen, then act with "
+        "`tap_text`/`tap_id` (tap by name, not pixels). Use `screenshot` when "
+        "you need to look at pixels. Fall back to `shell`/`root_shell` for "
+        "anything not covered by a dedicated tool."
     ),
 )
 
@@ -45,7 +55,38 @@ adb = Adb()
 
 
 # --------------------------------------------------------------------------- #
-# Connection & info
+# Internal helpers
+# --------------------------------------------------------------------------- #
+def _err(exc: Exception) -> str:
+    return f"Error: {exc}"
+
+
+def _screen_size() -> tuple[int, int]:
+    """Return (width, height) in pixels, honoring any override size."""
+    out = adb.shell("wm size").stdout
+    override = re.search(r"Override size:\s*(\d+)x(\d+)", out)
+    physical = re.search(r"Physical size:\s*(\d+)x(\d+)", out)
+    m = override or physical
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return 1080, 2340  # sane OnePlus-ish fallback
+
+
+def _get_elements() -> tuple[list[ui.Element], str]:
+    """Dump and parse the current UI hierarchy. Returns (elements, error)."""
+    adb.shell("uiautomator dump /sdcard/window_dump.xml", timeout=30)
+    xml = adb.shell("cat /sdcard/window_dump.xml")
+    if "<hierarchy" not in xml.stdout:
+        return [], xml.text() or "Could not dump UI hierarchy."
+    return ui.parse_hierarchy(xml.stdout), ""
+
+
+def _tap(x: int, y: int) -> None:
+    adb.shell(f"input tap {x} {y}")
+
+
+# --------------------------------------------------------------------------- #
+# Connection & device info
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 def list_devices() -> str:
@@ -53,30 +94,27 @@ def list_devices() -> str:
     try:
         return adb.devices().text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
 def connect_wireless(
-    host_port: Annotated[
-        str, Field(description="Device address as host:port, e.g. 192.168.1.42:5555")
-    ],
+    host_port: Annotated[str, Field(description="Device address host:port, e.g. 192.168.1.42:5555")],
 ) -> str:
     """Connect to a device over wireless ADB (after `adb tcpip 5555` on USB)."""
     try:
         return adb.connect(host_port).text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
 def device_status() -> str:
-    """Report whether a device is attached, its model, Android version, and root status."""
+    """Report device presence, model, Android version, root status, and screen state."""
     try:
         devices = adb.devices()
         if "device" not in devices.stdout.replace("List of devices", ""):
             return "No device attached.\n\n" + devices.text()
-
         props = {
             "model": "ro.product.model",
             "device": "ro.product.device",
@@ -84,21 +122,20 @@ def device_status() -> str:
             "sdk": "ro.build.version.sdk",
             "build": "ro.build.display.id",
         }
-        lines = []
-        for label, prop in props.items():
-            val = adb.shell(f"getprop {prop}").stdout.strip()
-            lines.append(f"{label:>8}: {val}")
-        lines.append(f"{'root':>8}: {'yes (su grants uid 0)' if adb.has_root() else 'NOT available'}")
+        lines = [f"{k:>9}: {adb.shell(f'getprop {v}').stdout.strip()}" for k, v in props.items()]
+        w, h = _screen_size()
+        lines.append(f"{'screen':>9}: {w}x{h}")
+        awake = "Awake" in adb.shell("dumpsys power").stdout or "state=ON" in adb.shell("dumpsys power").stdout
+        lines.append(f"{'screen on':>9}: {'yes' if awake else 'no'}")
+        lines.append(f"{'root':>9}: {'yes (su grants uid 0)' if adb.has_root() else 'NOT available'}")
         return "\n".join(lines)
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
 def device_info(
-    property_filter: Annotated[
-        str, Field(description="Optional substring to filter getprop output, e.g. 'battery' or 'product'")
-    ] = "",
+    property_filter: Annotated[str, Field(description="Optional substring filter for getprop, e.g. 'battery'")] = "",
 ) -> str:
     """Dump device system properties (`getprop`), optionally filtered by substring."""
     try:
@@ -106,46 +143,30 @@ def device_info(
         if not res.ok:
             return res.text()
         if property_filter:
-            matched = [ln for ln in res.stdout.splitlines()
-                       if property_filter.lower() in ln.lower()]
+            matched = [ln for ln in res.stdout.splitlines() if property_filter.lower() in ln.lower()]
             return "\n".join(matched) or f"No properties matched '{property_filter}'."
         return res.stdout
     except AdbError as exc:
-        return f"Error: {exc}"
-
-
-# --------------------------------------------------------------------------- #
-# Shell
-# --------------------------------------------------------------------------- #
-@mcp.tool()
-def shell(
-    command: Annotated[str, Field(description="Shell command to run on the device (non-root)")],
-) -> str:
-    """Run an arbitrary command in the device shell as the regular shell user."""
-    try:
-        return adb.shell(command).text()
-    except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
-def root_shell(
-    command: Annotated[str, Field(description="Shell command to run as root via su")],
-) -> str:
-    """Run an arbitrary command as root (uid 0) via `su -c`. Requires a rooted device."""
+def get_screen_size() -> str:
+    """Return the screen resolution and density (pixels)."""
     try:
-        return adb.root_shell(command).text()
+        w, h = _screen_size()
+        density = adb.shell("wm density").stdout.strip()
+        return f"{w}x{h}\n{density}"
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 # --------------------------------------------------------------------------- #
-# UI automation
+# Seeing the screen
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 def screenshot() -> Image:
-    """Capture the current screen and return it as a PNG image."""
-    # screencap to stdout; -p emits PNG. Keep bytes intact.
+    """Capture the current screen as a PNG image (look at the phone with your eyes)."""
     proc = adb.raw(["exec-out", "screencap", "-p"], binary=True)
     if proc.returncode != 0:
         raise AdbError((proc.stderr or b"").decode(errors="replace") or "screencap failed")
@@ -153,16 +174,142 @@ def screenshot() -> Image:
 
 
 @mcp.tool()
-def tap(
-    x: Annotated[int, Field(description="X coordinate in pixels")],
-    y: Annotated[int, Field(description="Y coordinate in pixels")],
+def screen_elements(
+    interactive_only: Annotated[bool, Field(description="Only show tappable/text-bearing elements")] = True,
+    limit: Annotated[int, Field(description="Max elements to return")] = 80,
 ) -> str:
-    """Tap the screen at the given pixel coordinates."""
+    """Read the on-screen UI as a numbered list of elements with tap coordinates.
+
+    This is how you "see" buttons, fields, and labels. Each line shows the
+    element's text/description/id, its centre (x,y), and flags. Tap by name
+    with `tap_text`/`tap_id`, or use the coordinates with `tap`.
+    """
     try:
-        adb.shell(f"input tap {x} {y}")
+        elements, err = _get_elements()
+        if err:
+            return err
+        if interactive_only:
+            elements = ui.interactive(elements)
+        if not elements:
+            return "No elements found on screen."
+        shown = elements[:limit]
+        body = "\n".join(e.describe(i) for i, e in enumerate(shown))
+        more = f"\n… and {len(elements) - len(shown)} more (raise `limit`)." if len(elements) > limit else ""
+        return body + more
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def find_on_screen(
+    query: Annotated[str, Field(description="Text, content-description, or resource-id substring to search for")],
+) -> str:
+    """Find on-screen elements matching a query and report their tap coordinates."""
+    try:
+        elements, err = _get_elements()
+        if err:
+            return err
+        matches = ui.find(elements, query)
+        if not matches:
+            return f"Nothing on screen matches '{query}'."
+        return "\n".join(e.describe(i) for i, e in enumerate(matches))
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def current_app() -> str:
+    """Report the package/activity of the app currently in the foreground."""
+    try:
+        out = adb.shell(
+            "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity'"
+        ).stdout.strip()
+        if not out:
+            out = adb.shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").stdout.strip()
+        return out or "Could not determine the foreground app."
+    except AdbError as exc:
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Touch — taps & gestures
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def tap(x: Annotated[int, Field(description="X pixel")], y: Annotated[int, Field(description="Y pixel")]) -> str:
+    """Tap the screen at exact pixel coordinates."""
+    try:
+        _tap(x, y)
         return f"Tapped ({x}, {y})."
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
+
+
+@mcp.tool()
+def tap_text(
+    text: Annotated[str, Field(description="Visible text or content-description of the element to tap")],
+    exact: Annotated[bool, Field(description="Require an exact match instead of substring")] = False,
+) -> str:
+    """Find an element by its visible text/description and tap its centre."""
+    try:
+        elements, err = _get_elements()
+        if err:
+            return err
+        matches = ui.find(elements, text, exact=exact, clickable_only=True)
+        if not matches:
+            return f"No element matching '{text}'. Call `screen_elements` to see what's available."
+        target = matches[0]
+        cx, cy = target.center
+        _tap(cx, cy)
+        extra = f" ({len(matches)} matched; tapped first)" if len(matches) > 1 else ""
+        return f"Tapped {target.label!r} @ ({cx},{cy}).{extra}"
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def tap_id(
+    resource_id: Annotated[str, Field(description="Resource-id (or substring), e.g. com.app:id/login_button")],
+) -> str:
+    """Find an element by resource-id and tap its centre."""
+    try:
+        elements, err = _get_elements()
+        if err:
+            return err
+        matches = ui.find_by_id(elements, resource_id)
+        if not matches:
+            return f"No element with id matching '{resource_id}'."
+        cx, cy = matches[0].center
+        _tap(cx, cy)
+        return f"Tapped id={matches[0].resource_id} @ ({cx},{cy})."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def long_press(
+    x: Annotated[int, Field(description="X pixel")],
+    y: Annotated[int, Field(description="Y pixel")],
+    duration_ms: Annotated[int, Field(description="Hold duration in milliseconds")] = 800,
+) -> str:
+    """Press and hold at a point (e.g. to open a context menu)."""
+    try:
+        adb.shell(f"input swipe {x} {y} {x} {y} {duration_ms}")
+        return f"Long-pressed ({x},{y}) for {duration_ms}ms."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def double_tap(
+    x: Annotated[int, Field(description="X pixel")],
+    y: Annotated[int, Field(description="Y pixel")],
+) -> str:
+    """Double-tap at a point (e.g. to zoom)."""
+    try:
+        adb.shell(f"input tap {x} {y}; input tap {x} {y}")
+        return f"Double-tapped ({x},{y})."
+    except AdbError as exc:
+        return _err(exc)
 
 
 @mcp.tool()
@@ -173,58 +320,326 @@ def swipe(
     y2: Annotated[int, Field(description="End Y")],
     duration_ms: Annotated[int, Field(description="Swipe duration in milliseconds")] = 300,
 ) -> str:
-    """Swipe from one point to another over the given duration (use for scroll/drag)."""
+    """Swipe/drag from one point to another over the given duration."""
     try:
         adb.shell(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}")
         return f"Swiped ({x1},{y1}) -> ({x2},{y2}) in {duration_ms}ms."
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
+@mcp.tool()
+def scroll(
+    direction: Annotated[str, Field(description="up, down, left, or right")],
+    amount: Annotated[float, Field(description="Fraction of the screen to scroll, 0.1–0.9")] = 0.6,
+) -> str:
+    """Scroll the screen in a direction (content moves opposite to a finger swipe)."""
+    try:
+        w, h = _screen_size()
+        cx, cy = w // 2, h // 2
+        frac = max(0.1, min(0.9, amount))
+        dx, dy = int(w * frac / 2), int(h * frac / 2)
+        d = direction.lower()
+        # To scroll "down" (reveal lower content), the finger swipes up.
+        moves = {
+            "down": (cx, cy + dy, cx, cy - dy),
+            "up": (cx, cy - dy, cx, cy + dy),
+            "left": (cx + dx, cy, cx - dx, cy),
+            "right": (cx - dx, cy, cx + dx, cy),
+        }
+        if d not in moves:
+            return "direction must be one of: up, down, left, right"
+        x1, y1, x2, y2 = moves[d]
+        adb.shell(f"input swipe {x1} {y1} {x2} {y2} 300")
+        return f"Scrolled {d}."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def pinch(
+    direction: Annotated[str, Field(description="'in' to zoom out, 'out' to zoom in")],
+    x: Annotated[int, Field(description="Centre X (default: screen centre)")] = -1,
+    y: Annotated[int, Field(description="Centre Y (default: screen centre)")] = -1,
+) -> str:
+    """Two-finger pinch to zoom. 'out' zooms in, 'in' zooms out.
+
+    Approximated with two simultaneous vertical swipes around the centre point.
+    """
+    try:
+        w, h = _screen_size()
+        cx = x if x >= 0 else w // 2
+        cy = y if y >= 0 else h // 2
+        near, far = 80, 360
+        if direction.lower() == "out":  # zoom in: fingers move apart
+            top = (cx, cy - near, cx, cy - far)
+            bot = (cx, cy + near, cx, cy + far)
+        elif direction.lower() == "in":  # zoom out: fingers move together
+            top = (cx, cy - far, cx, cy - near)
+            bot = (cx, cy + far, cx, cy + near)
+        else:
+            return "direction must be 'in' or 'out'"
+        cmd = (
+            f"input swipe {top[0]} {top[1]} {top[2]} {top[3]} 300 & "
+            f"input swipe {bot[0]} {bot[1]} {bot[2]} {bot[3]} 300 & wait"
+        )
+        adb.shell(cmd)
+        return f"Pinched {direction} around ({cx},{cy})."
+    except AdbError as exc:
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Typing
+# --------------------------------------------------------------------------- #
 @mcp.tool()
 def input_text(
     text: Annotated[str, Field(description="Text to type into the focused field")],
 ) -> str:
     """Type text into the currently focused input field."""
     try:
-        # `input text` treats spaces specially; escape them as %s.
         escaped = text.replace(" ", "%s")
         adb.shell(f"input text {shlex.quote(escaped)}")
         return f"Typed {len(text)} characters."
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
+
+
+@mcp.tool()
+def type_and_enter(
+    text: Annotated[str, Field(description="Text to type, followed by the Enter key")],
+) -> str:
+    """Type text into the focused field and press Enter (e.g. submit a search)."""
+    try:
+        escaped = text.replace(" ", "%s")
+        adb.shell(f"input text {shlex.quote(escaped)}; input keyevent KEYCODE_ENTER")
+        return f"Typed {len(text)} characters and pressed Enter."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def clear_text() -> str:
+    """Clear the currently focused text field (select-all then delete)."""
+    try:
+        # Move to end, select all, delete.
+        adb.shell("input keyevent KEYCODE_MOVE_END")
+        adb.shell("input keyevent --longpress $(seq -s ' ' 0 80 | sed 's/[0-9]*/KEYCODE_DEL/g')")
+        return "Cleared focused field."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def paste() -> str:
+    """Paste clipboard contents into the focused field."""
+    try:
+        adb.shell("input keyevent KEYCODE_PASTE")
+        return "Pasted."
+    except AdbError as exc:
+        return _err(exc)
 
 
 @mcp.tool()
 def keyevent(
-    key: Annotated[
-        str,
-        Field(description="Android keycode name or number, e.g. HOME, BACK, ENTER, 26 (power), 4"),
-    ],
+    key: Annotated[str, Field(description="Keycode name or number, e.g. ENTER, TAB, DEL, 26, SEARCH")],
 ) -> str:
-    """Send a key event. Common names: HOME, BACK, MENU, POWER, VOLUME_UP, ENTER, APP_SWITCH."""
+    """Send an arbitrary key event by name or number."""
     try:
-        # Accept either bare names (auto-prefixed) or raw numbers/full names.
         token = key if key.isdigit() or key.startswith("KEYCODE_") else f"KEYCODE_{key.upper()}"
         adb.shell(f"input keyevent {token}")
         return f"Sent keyevent {token}."
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 # --------------------------------------------------------------------------- #
-# App management
+# Navigation shortcuts
+# --------------------------------------------------------------------------- #
+def _key(name: str) -> str:
+    adb.shell(f"input keyevent KEYCODE_{name}")
+    return f"Pressed {name}."
+
+
+@mcp.tool()
+def home() -> str:
+    """Press the Home button."""
+    try:
+        return _key("HOME")
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def back() -> str:
+    """Press the Back button."""
+    try:
+        return _key("BACK")
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def recents() -> str:
+    """Open the recent-apps / app-switcher view."""
+    try:
+        return _key("APP_SWITCH")
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def open_notifications() -> str:
+    """Pull down the notification shade."""
+    try:
+        adb.shell("cmd statusbar expand-notifications")
+        return "Opened notification shade."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def open_quick_settings() -> str:
+    """Pull down the quick-settings panel."""
+    try:
+        adb.shell("cmd statusbar expand-settings")
+        return "Opened quick settings."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def close_panels() -> str:
+    """Collapse any open notification/quick-settings panels and dialogs."""
+    try:
+        adb.shell("cmd statusbar collapse")
+        adb.shell("am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS")
+        return "Collapsed panels."
+    except AdbError as exc:
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Screen power, lock, rotation, brightness
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def wake() -> str:
+    """Wake the screen (turn the display on)."""
+    try:
+        adb.shell("input keyevent KEYCODE_WAKEUP")
+        return "Woke the screen."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def sleep_screen() -> str:
+    """Turn the display off (sleep)."""
+    try:
+        adb.shell("input keyevent KEYCODE_SLEEP")
+        return "Put the screen to sleep."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def is_screen_on() -> str:
+    """Report whether the display is currently on."""
+    try:
+        out = adb.shell("dumpsys power").stdout
+        on = "Awake" in out or "mWakefulness=Awake" in out or "state=ON" in out
+        return "Screen is ON." if on else "Screen is OFF."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def unlock(
+    pin: Annotated[str, Field(description="PIN/password to enter, if the device is secured (optional)")] = "",
+) -> str:
+    """Wake the device, swipe up to dismiss the lockscreen, and enter a PIN if given."""
+    try:
+        w, h = _screen_size()
+        adb.shell("input keyevent KEYCODE_WAKEUP")
+        time.sleep(0.4)
+        adb.shell(f"input swipe {w // 2} {int(h * 0.8)} {w // 2} {int(h * 0.2)} 200")
+        time.sleep(0.4)
+        if pin:
+            escaped = pin.replace(" ", "%s")
+            adb.shell(f"input text {shlex.quote(escaped)}")
+            adb.shell("input keyevent KEYCODE_ENTER")
+            return "Woke, swiped up, and entered PIN."
+        return "Woke and swiped up to unlock."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def rotate(
+    orientation: Annotated[str, Field(description="portrait, landscape, reverse-portrait, reverse-landscape, or 0/90/180/270")],
+) -> str:
+    """Force screen rotation (disables auto-rotate and sets a fixed orientation)."""
+    try:
+        mapping = {
+            "portrait": 0, "0": 0,
+            "landscape": 1, "90": 1,
+            "reverse-portrait": 2, "180": 2,
+            "reverse-landscape": 3, "270": 3,
+        }
+        val = mapping.get(orientation.lower())
+        if val is None:
+            return "orientation must be portrait/landscape/reverse-portrait/reverse-landscape or 0/90/180/270"
+        adb.shell("settings put system accelerometer_rotation 0")
+        adb.shell(f"settings put system user_rotation {val}")
+        return f"Set orientation to {orientation}."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def set_brightness(
+    level: Annotated[int, Field(description="Brightness 0–255")],
+) -> str:
+    """Set screen brightness (switches to manual brightness mode)."""
+    try:
+        lvl = max(0, min(255, level))
+        adb.shell("settings put system screen_brightness_mode 0")
+        adb.shell(f"settings put system screen_brightness {lvl}")
+        return f"Set brightness to {lvl}/255."
+    except AdbError as exc:
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Volume
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def volume(
+    action: Annotated[str, Field(description="up, down, or mute")],
+) -> str:
+    """Adjust media volume (up/down) or toggle mute."""
+    try:
+        keys = {"up": "VOLUME_UP", "down": "VOLUME_DOWN", "mute": "VOLUME_MUTE"}
+        key = keys.get(action.lower())
+        if not key:
+            return "action must be up, down, or mute"
+        adb.shell(f"input keyevent KEYCODE_{key}")
+        return f"Volume {action}."
+    except AdbError as exc:
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Apps
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 def list_packages(
-    filter_text: Annotated[str, Field(description="Optional substring to filter package names")] = "",
-    third_party_only: Annotated[bool, Field(description="Only list user-installed (non-system) apps")] = False,
+    filter_text: Annotated[str, Field(description="Optional substring filter for package names")] = "",
+    third_party_only: Annotated[bool, Field(description="Only user-installed (non-system) apps")] = False,
 ) -> str:
     """List installed application package names."""
     try:
-        cmd = "pm list packages"
-        if third_party_only:
-            cmd += " -3"
+        cmd = "pm list packages" + (" -3" if third_party_only else "")
         res = adb.shell(cmd)
         if not res.ok:
             return res.text()
@@ -233,21 +648,20 @@ def list_packages(
             names = [n for n in names if filter_text.lower() in n.lower()]
         return "\n".join(names) or "No matching packages."
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
 def start_app(
     package: Annotated[str, Field(description="Package name, e.g. com.android.settings")],
 ) -> str:
-    """Launch an app by package name using its default launcher activity."""
+    """Launch an app by package name via its default launcher activity."""
     try:
-        res = adb.shell(
+        return adb.shell(
             f"monkey -p {shlex.quote(package)} -c android.intent.category.LAUNCHER 1"
-        )
-        return res.text()
+        ).text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
@@ -259,7 +673,21 @@ def stop_app(
         adb.shell(f"am force-stop {shlex.quote(package)}")
         return f"Force-stopped {package}."
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
+
+
+@mcp.tool()
+def open_app_settings(
+    package: Annotated[str, Field(description="Package whose App Info screen to open")],
+) -> str:
+    """Open the system App-Info screen for a package."""
+    try:
+        adb.shell(
+            f"am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d package:{shlex.quote(package)}"
+        )
+        return f"Opened App Info for {package}."
+    except AdbError as exc:
+        return _err(exc)
 
 
 @mcp.tool()
@@ -271,13 +699,10 @@ def install_apk(
     if not os.path.isfile(apk_path):
         return f"Error: file not found on host: {apk_path}"
     try:
-        args = ["install"]
-        if reinstall:
-            args.append("-r")
-        args.append(apk_path)
+        args = ["install"] + (["-r"] if reinstall else []) + [apk_path]
         return adb.run(args, timeout=300).text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
@@ -287,13 +712,189 @@ def uninstall(
 ) -> str:
     """Uninstall an app by package name."""
     try:
-        args = ["uninstall"]
-        if keep_data:
-            args.append("-k")
-        args.append(package)
+        args = ["uninstall"] + (["-k"] if keep_data else []) + [package]
         return adb.run(args).text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Communication & intents
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def open_url(
+    url: Annotated[str, Field(description="URL to open in the default browser, e.g. https://example.com")],
+) -> str:
+    """Open a URL in the default browser."""
+    try:
+        return adb.shell(
+            f"am start -a android.intent.action.VIEW -d {shlex.quote(url)}"
+        ).text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def dial(
+    number: Annotated[str, Field(description="Phone number to load into the dialer")],
+) -> str:
+    """Open the dialer pre-filled with a number (does not place the call)."""
+    try:
+        return adb.shell(f"am start -a android.intent.action.DIAL -d tel:{shlex.quote(number)}").text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def call(
+    number: Annotated[str, Field(description="Phone number to call immediately")],
+) -> str:
+    """Place a phone call to a number (requires CALL permission; uses root)."""
+    try:
+        return adb.root_shell(f"am start -a android.intent.action.CALL -d tel:{shlex.quote(number)}").text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def compose_sms(
+    number: Annotated[str, Field(description="Recipient phone number")],
+    message: Annotated[str, Field(description="Message body to pre-fill")],
+) -> str:
+    """Open the SMS app composing a message (you still tap Send)."""
+    try:
+        return adb.shell(
+            f"am start -a android.intent.action.SENDTO -d sms:{shlex.quote(number)} "
+            f"--es sms_body {shlex.quote(message)} --ez exit_on_sent true"
+        ).text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def start_intent(
+    action: Annotated[str, Field(description="Intent action, e.g. android.intent.action.VIEW")] = "",
+    data: Annotated[str, Field(description="Data URI, e.g. geo:0,0?q=coffee")] = "",
+    component: Annotated[str, Field(description="Explicit component pkg/.Activity (optional)")] = "",
+    extras: Annotated[str, Field(description="Extra am args, e.g. \"--es key value\"")] = "",
+) -> str:
+    """Fire an arbitrary intent with `am start` (advanced)."""
+    try:
+        cmd = "am start"
+        if action:
+            cmd += f" -a {shlex.quote(action)}"
+        if data:
+            cmd += f" -d {shlex.quote(data)}"
+        if component:
+            cmd += f" -n {shlex.quote(component)}"
+        if extras:
+            cmd += f" {extras}"
+        return adb.shell(cmd).text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Connectivity toggles (root)
+# --------------------------------------------------------------------------- #
+def _svc(domain: str, on: bool) -> str:
+    state = "enable" if on else "disable"
+    res = adb.root_shell(f"svc {domain} {state}")
+    return f"{domain} {state}d." if res.ok else res.text()
+
+
+@mcp.tool()
+def toggle_wifi(on: Annotated[bool, Field(description="True to enable Wi-Fi, False to disable")]) -> str:
+    """Turn Wi-Fi on or off (root)."""
+    try:
+        return _svc("wifi", on)
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def toggle_bluetooth(on: Annotated[bool, Field(description="True to enable Bluetooth, False to disable")]) -> str:
+    """Turn Bluetooth on or off (root)."""
+    try:
+        return _svc("bluetooth", on)
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def toggle_mobile_data(on: Annotated[bool, Field(description="True to enable mobile data, False to disable")]) -> str:
+    """Turn mobile data on or off (root)."""
+    try:
+        return _svc("data", on)
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def toggle_airplane(on: Annotated[bool, Field(description="True to enable airplane mode, False to disable")]) -> str:
+    """Turn airplane mode on or off (root)."""
+    try:
+        val = 1 if on else 0
+        adb.root_shell(f"settings put global airplane_mode_on {val}")
+        adb.root_shell(
+            f"am broadcast -a android.intent.action.AIRPLANE_MODE --ez state {'true' if on else 'false'}"
+        )
+        return f"Airplane mode {'on' if on else 'off'}."
+    except AdbError as exc:
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# System status: battery, notifications, clipboard
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def get_battery() -> str:
+    """Report battery level, charging state, temperature, and health."""
+    try:
+        out = adb.shell("dumpsys battery").stdout
+        keep = ("level", "scale", "status", "health", "plugged", "temperature", "voltage")
+        lines = [ln.strip() for ln in out.splitlines() if any(k in ln for k in keep)]
+        return "\n".join(lines) or out
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def notifications() -> str:
+    """List a summary of the currently active notifications."""
+    try:
+        out = adb.shell("dumpsys notification --noredact").stdout
+        if not out.strip():
+            out = adb.shell("dumpsys notification").stdout
+        lines = []
+        for ln in out.splitlines():
+            s = ln.strip()
+            if s.startswith("pkg=") or "android.title=" in s or "android.text=" in s or "tickerText=" in s:
+                lines.append(s)
+        return "\n".join(lines[:200]) or "No active notifications found."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def clipboard_get() -> str:
+    """Read the device clipboard text (best-effort; needs Android 12+)."""
+    try:
+        return adb.shell("cmd clipboard get-text").text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def clipboard_set(
+    text: Annotated[str, Field(description="Text to place on the device clipboard")],
+) -> str:
+    """Set the device clipboard text (best-effort; needs Android 12+)."""
+    try:
+        res = adb.shell(f"cmd clipboard set-text {shlex.quote(text)}")
+        return "Clipboard set." if res.ok else res.text()
+    except AdbError as exc:
+        return _err(exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -310,7 +911,7 @@ def push_file(
     try:
         return adb.run(["push", local_path, remote_path], timeout=300).text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
@@ -322,7 +923,7 @@ def pull_file(
     try:
         return adb.run(["pull", remote_path, local_path], timeout=300).text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
@@ -336,7 +937,7 @@ def read_file(
         res = adb.root_shell(cmd) if as_root else adb.shell(cmd)
         return res.text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 @mcp.tool()
@@ -345,26 +946,38 @@ def write_file(
     content: Annotated[str, Field(description="Text content to write (overwrites existing file)")],
     as_root: Annotated[bool, Field(description="Write with root privileges (for protected paths)")] = True,
 ) -> str:
-    """Write text to a file on the device. Uses root by default for protected paths.
-
-    Content is base64-encoded on the host and decoded on the device, so it
-    survives arbitrary bytes, quotes, and newlines safely.
-    """
+    """Write text to a file on the device (base64-safe). Uses root by default."""
     try:
         encoded = base64.b64encode(content.encode()).decode()
-        # Decode in the device shell and redirect into the target path.
         inner = f"echo {encoded} | base64 -d > {shlex.quote(remote_path)}"
         res = adb.root_shell(inner) if as_root else adb.shell(inner)
         if res.ok and not res.stderr.strip():
             return f"Wrote {len(content)} bytes to {remote_path}."
         return res.text()
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
 
 
 # --------------------------------------------------------------------------- #
-# Diagnostics & power
+# Capture: screen recording, logs
 # --------------------------------------------------------------------------- #
+@mcp.tool()
+def screen_record(
+    seconds: Annotated[int, Field(description="Recording length in seconds (max 180)")] = 10,
+    local_path: Annotated[str, Field(description="Where to save the .mp4 on the host machine")] = "screenrecord.mp4",
+) -> str:
+    """Record the screen for N seconds and pull the video to the host machine."""
+    try:
+        secs = max(1, min(180, seconds))
+        remote = "/sdcard/_mcp_screenrecord.mp4"
+        adb.shell(f"screenrecord --time-limit {secs} {remote}", timeout=secs + 30)
+        pull = adb.run(["pull", remote, local_path], timeout=120)
+        adb.shell(f"rm -f {remote}")
+        return f"Recorded {secs}s.\n{pull.text()}"
+    except AdbError as exc:
+        return _err(exc)
+
+
 @mcp.tool()
 def logcat(
     lines: Annotated[int, Field(description="Number of recent log lines to return")] = 200,
@@ -372,7 +985,6 @@ def logcat(
 ) -> str:
     """Return recent logcat output (a snapshot, not a live stream)."""
     try:
-        # -d dumps and exits; -t N limits to the last N lines.
         res = adb.shell(f"logcat -d -t {int(lines)}")
         if not res.ok:
             return res.text()
@@ -381,15 +993,47 @@ def logcat(
             out = "\n".join(ln for ln in out.splitlines() if filter_text.lower() in ln.lower())
         return out or "(no matching log lines)"
     except AdbError as exc:
-        return f"Error: {exc}"
+        return _err(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Shell & power
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def shell(
+    command: Annotated[str, Field(description="Shell command to run on the device (non-root)")],
+) -> str:
+    """Run an arbitrary command in the device shell as the regular shell user."""
+    try:
+        return adb.shell(command).text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def root_shell(
+    command: Annotated[str, Field(description="Shell command to run as root via su")],
+) -> str:
+    """Run an arbitrary command as root (uid 0) via `su -c`. Requires a rooted device."""
+    try:
+        return adb.root_shell(command).text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def wait(
+    seconds: Annotated[float, Field(description="Seconds to pause (lets the UI settle)")] = 1.0,
+) -> str:
+    """Pause for a moment so the UI can react/animate before the next action."""
+    secs = max(0.0, min(30.0, seconds))
+    time.sleep(secs)
+    return f"Waited {secs}s."
 
 
 @mcp.tool()
 def reboot(
-    mode: Annotated[
-        str,
-        Field(description="Reboot target: '' (normal), 'recovery', 'bootloader', or 'fastboot'"),
-    ] = "",
+    mode: Annotated[str, Field(description="'' (normal), 'recovery', 'bootloader', or 'fastboot'")] = "",
 ) -> str:
     """Reboot the device, optionally into recovery/bootloader/fastboot."""
     try:
@@ -397,7 +1041,6 @@ def reboot(
         adb.run(args, timeout=30)
         return f"Reboot requested ({mode or 'normal'})."
     except AdbError as exc:
-        # A dropped connection on reboot is expected, not a real failure.
         return f"Reboot requested ({mode or 'normal'}). (adb link dropped: {exc})"
 
 
