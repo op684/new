@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Local artifacts
+*.png
+*.apk
+pulled/
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

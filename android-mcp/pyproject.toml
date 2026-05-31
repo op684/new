@@ -1,0 +1,20 @@
+[project]
+name = "android-mcp"
+version = "0.1.0"
+description = "MCP server giving Claude (Opus 4.8) full control over a rooted Android device via ADB"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp[cli]>=1.2.0",
+]
+
+[project.scripts]
+android-mcp = "android_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/android_mcp"]
