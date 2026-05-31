@@ -134,6 +134,25 @@ like *"read what's on my phone screen right now"* and Claude will call
 > and it works even when you can't (or don't want to) capture pixels. Keep
 > `screenshot` for cases where an app draws custom/canvas UI the tree can't see.
 
+## Auto-run the app you just built (autonomous)
+
+Want Claude to **automatically install, open, and test the app on your phone**
+as soon as it finishes coding — without asking each time? Drop the templates in
+[`autorun/`](./autorun/) into your Android Studio app project:
+
+- `autorun/CLAUDE.md` → `<app-project>/CLAUDE.md` — instructs Claude to
+  build → `install_and_launch` → read the first screen → exercise the feature →
+  read `logcat` on a crash, after every successful build.
+- `autorun/settings.json` → `<app-project>/.claude/settings.json` —
+  pre-approves the MCP tools and the gradle build so they run without a prompt
+  (destructive tools like `uninstall`/`reboot`/`root_shell` still ask).
+- `.mcp.json.example` → `<app-project>/.mcp.json` — registers the server for the
+  project (or use `claude mcp add --scope user` once for all projects).
+
+See [`autorun/README.md`](./autorun/README.md) for the copy-paste setup. The key
+tools that make this one step are **`install_and_launch`** (install fresh APK →
+open → read) and **`launch_and_read`** (open → read).
+
 ## Configuration (env vars)
 
 | Variable         | Default | Purpose                                              |
@@ -240,6 +259,8 @@ the AI "sees" the new screen without a separate call.
 |------|--------------|
 | `list_packages` | List installed apps (filter / 3rd-party only) |
 | `start_app` / `stop_app` | Launch / force-stop an app |
+| `launch_and_read` | **Launch an app and auto-read its first screen** once it settles |
+| `install_and_launch` | **Install a fresh APK, open it, and read its first screen** (after a build) |
 | `open_app_settings` | Open an app's App-Info screen |
 | `install_apk` / `uninstall` | Install from host / remove an app |
 

@@ -806,6 +806,41 @@ def stop_app(
         return _err(exc)
 
 
+def _launch_and_read(package: str, timeout: float) -> str:
+    """Core: launch an app, wait for its first screen to settle, and read it."""
+    launch = adb.shell(
+        f"monkey -p {shlex.quote(package)} -c android.intent.category.LAUNCHER 1"
+    )
+    if "No activities found" in launch.stdout or "aborted" in launch.stdout.lower():
+        return f"Could not launch {package}:\n{launch.text()}"
+    # No baseline: _settle just waits for the new screen to load and hold steady.
+    elements, _sig, _changed = _settle(baseline=None, timeout=timeout)
+    fg = adb.shell(
+        "dumpsys activity activities | grep -m1 -E 'mResumedActivity|topResumedActivity'"
+    ).stdout.strip()
+    header = f"Launched {package}."
+    if fg:
+        header += f"\nForeground: {fg}"
+    return header + "\nNow showing:\n" + _format_screen(elements)
+
+
+@mcp.tool()
+def launch_and_read(
+    package: Annotated[str, Field(description="Package name to launch, e.g. com.example.myapp")],
+    timeout: Annotated[float, Field(description="Max seconds to wait for the app's first screen to settle")] = 8.0,
+) -> str:
+    """Launch an app and automatically read its first screen once it settles.
+
+    The "open the app I just built and see it" tool: it starts the app, waits
+    for the UI to finish loading/animating, and returns the on-screen elements
+    so you can verify the layout and keep interacting — no separate read needed.
+    """
+    try:
+        return _launch_and_read(package, timeout)
+    except AdbError as exc:
+        return _err(exc)
+
+
 @mcp.tool()
 def open_app_settings(
     package: Annotated[str, Field(description="Package whose App Info screen to open")],
@@ -831,6 +866,30 @@ def install_apk(
     try:
         args = ["install"] + (["-r"] if reinstall else []) + [apk_path]
         return adb.run(args, timeout=300).text()
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def install_and_launch(
+    apk_path: Annotated[str, Field(description="Path to the freshly built APK on the host machine")],
+    package: Annotated[str, Field(description="The app's package name to launch after install")],
+    timeout: Annotated[float, Field(description="Max seconds to wait for the app's first screen to settle")] = 8.0,
+) -> str:
+    """Install a freshly built APK, launch it, and read its first screen.
+
+    The end-to-end "ship what I just built and look at it" tool: installs the
+    APK (reinstalling over any existing copy), opens the app, waits for it to
+    settle, and returns the on-screen elements. Ideal right after a build so the
+    AI can immediately verify the app runs and looks right.
+    """
+    if not os.path.isfile(apk_path):
+        return f"Error: APK not found on host: {apk_path}"
+    try:
+        res = adb.run(["install", "-r", apk_path], timeout=300)
+        if not res.ok or "Success" not in res.stdout:
+            return f"Install failed:\n{res.text()}"
+        return "Installed OK.\n" + _launch_and_read(package, timeout)
     except AdbError as exc:
         return _err(exc)
 
