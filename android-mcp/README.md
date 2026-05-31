@@ -88,11 +88,48 @@ Windows: `%APPDATA%\Claude\claude_desktop_config.json`) — see
 
 Restart Claude Desktop. You should see the `android-control` tools appear.
 
-### Using it from Claude Code
+### Using it from Claude Code (CLI / Android Studio terminal)
+
+This is the setup if you run the `claude` CLI inside Android Studio. Register
+the server once, then Claude can read and drive the phone over ADB.
 
 ```bash
-claude mcp add android-control -- uv --directory /absolute/path/to/android-mcp run android-mcp
+# From anywhere; --scope user makes it available in every project.
+claude mcp add android-control --scope user -- \
+  uv --directory /absolute/path/to/android-mcp run android-mcp
 ```
+
+Or commit a project-scoped [`.mcp.json`](./.mcp.json.example) at your Android
+Studio project root (copy the example and fix the path):
+
+```json
+{
+  "mcpServers": {
+    "android-control": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/android-mcp", "run", "android-mcp"],
+      "env": { "ADB_PATH": "adb", "ANDROID_SERIAL": "", "ADB_TIMEOUT": "120" }
+    }
+  }
+}
+```
+
+Verify it's connected from inside the CLI:
+
+```
+/mcp
+```
+
+You should see `android-control` listed with its tools. Now you can say things
+like *"read what's on my phone screen right now"* and Claude will call
+`screen_text` / `screen_elements` — **no screenshot needed**.
+
+> **Seeing without screenshots:** `screen_text`, `screen_elements`, and
+> `ui_tree` read the device's accessibility/UI tree (via `uiautomator`) and
+> return it as plain text — actual on-screen labels, fields, and structure,
+> not an image. That's faster and more precise than a screenshot for the model,
+> and it works even when you can't (or don't want to) capture pixels. Keep
+> `screenshot` for cases where an app draws custom/canvas UI the tree can't see.
 
 ## Configuration (env vars)
 
@@ -107,14 +144,16 @@ claude mcp add android-control -- uv --directory /absolute/path/to/android-mcp r
 The toolset is built so the model can operate the phone **as if it were holding
 it** — see the screen, read the UI, and tap things by name.
 
-### See the screen
+### See the screen (no screenshot needed)
 
 | Tool | What it does |
 |------|--------------|
-| `screenshot` | Capture the screen as a PNG (look with your eyes) |
+| `screen_text` | **Read all on-screen text as plain text** (accessibility tree) |
 | `screen_elements` | Read the UI as a numbered list of elements + tap coordinates |
+| `ui_tree` | Read the UI as an indented hierarchy (structure + text + coords) |
 | `find_on_screen` | Search on-screen elements by text/desc/id |
 | `current_app` | Which app/activity is in the foreground |
+| `screenshot` | Capture the screen as a PNG (only when you need pixels) |
 
 ### Touch & gestures
 
@@ -205,7 +244,7 @@ it** — see the screen, read the UI, and tap things by name.
 A typical interaction mirrors how a person uses a phone:
 
 1. `wake` / `unlock` — turn the screen on.
-2. `screen_elements` — *see* what's on screen (or `screenshot` to look).
+2. `screen_text` / `screen_elements` — *read* what's on screen (no screenshot).
 3. `tap_text "Messages"` — *act* on what you see, by name.
 4. `wait` — let the screen settle.
 5. repeat: look → act → look.

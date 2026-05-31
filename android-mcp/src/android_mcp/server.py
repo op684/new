@@ -72,13 +72,21 @@ def _screen_size() -> tuple[int, int]:
     return 1080, 2340  # sane OnePlus-ish fallback
 
 
-def _get_elements() -> tuple[list[ui.Element], str]:
-    """Dump and parse the current UI hierarchy. Returns (elements, error)."""
+def _dump_ui_xml() -> tuple[str, str]:
+    """Dump the current UI hierarchy as raw XML. Returns (xml, error)."""
     adb.shell("uiautomator dump /sdcard/window_dump.xml", timeout=30)
     xml = adb.shell("cat /sdcard/window_dump.xml")
     if "<hierarchy" not in xml.stdout:
-        return [], xml.text() or "Could not dump UI hierarchy."
-    return ui.parse_hierarchy(xml.stdout), ""
+        return "", xml.text() or "Could not dump UI hierarchy."
+    return xml.stdout, ""
+
+
+def _get_elements() -> tuple[list[ui.Element], str]:
+    """Dump and parse the current UI hierarchy. Returns (elements, error)."""
+    xml, err = _dump_ui_xml()
+    if err:
+        return [], err
+    return ui.parse_hierarchy(xml), ""
 
 
 def _tap(x: int, y: int) -> None:
@@ -213,6 +221,51 @@ def find_on_screen(
         if not matches:
             return f"Nothing on screen matches '{query}'."
         return "\n".join(e.describe(i) for i, e in enumerate(matches))
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def screen_text() -> str:
+    """Read ALL readable text currently on screen, in order — no screenshot needed.
+
+    Pulls the visible text and content-descriptions straight from the
+    accessibility/UI tree, so you "read" the phone as plain text instead of
+    looking at pixels. Use this to understand what an app is showing.
+    """
+    try:
+        elements, err = _get_elements()
+        if err:
+            return err
+        lines = ui.extract_text(elements)
+        return "\n".join(lines) or "No readable text on screen."
+    except AdbError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def ui_tree(
+    compact: Annotated[bool, Field(description="Collapse structural-only containers for readability")] = True,
+    limit: Annotated[int, Field(description="Max lines to return")] = 400,
+) -> str:
+    """Read the screen as an indented hierarchy: structure + text + tap coords.
+
+    This is the richest text-only view of the screen — it shows how elements
+    nest (lists, rows, cards) along with each element's text/id and centre
+    coordinates. Use it when flat `screen_elements` doesn't make the layout
+    clear. No screenshot is taken.
+    """
+    try:
+        xml, err = _dump_ui_xml()
+        if err:
+            return err
+        tops = ui.parse_tree(xml)
+        lines = ui.render_outline(tops, compact=compact)
+        if not lines:
+            return "No elements found on screen."
+        shown = lines[:limit]
+        more = f"\n… and {len(lines) - len(shown)} more lines (raise `limit`)." if len(lines) > limit else ""
+        return "\n".join(shown) + more
     except AdbError as exc:
         return _err(exc)
 

@@ -87,32 +87,96 @@ def _b(node: ET.Element, attr: str) -> bool:
     return node.get(attr, "false") == "true"
 
 
+def _make_element(node: ET.Element) -> Element:
+    return Element(
+        text=node.get("text", ""),
+        resource_id=node.get("resource-id", ""),
+        content_desc=node.get("content-desc", ""),
+        clazz=node.get("class", ""),
+        package=node.get("package", ""),
+        bounds=_parse_bounds(node.get("bounds", "")),
+        clickable=_b(node, "clickable"),
+        enabled=_b(node, "enabled"),
+        focused=_b(node, "focused"),
+        scrollable=_b(node, "scrollable"),
+        checkable=_b(node, "checkable"),
+        checked=_b(node, "checked"),
+        long_clickable=_b(node, "long-clickable"),
+    )
+
+
 def parse_hierarchy(xml: str) -> list[Element]:
-    """Parse a uiautomator XML dump into a flat list of Elements."""
+    """Parse a uiautomator XML dump into a flat list of Elements (document order)."""
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
         return []
-    elements: list[Element] = []
-    for node in root.iter("node"):
-        elements.append(
-            Element(
-                text=node.get("text", ""),
-                resource_id=node.get("resource-id", ""),
-                content_desc=node.get("content-desc", ""),
-                clazz=node.get("class", ""),
-                package=node.get("package", ""),
-                bounds=_parse_bounds(node.get("bounds", "")),
-                clickable=_b(node, "clickable"),
-                enabled=_b(node, "enabled"),
-                focused=_b(node, "focused"),
-                scrollable=_b(node, "scrollable"),
-                checkable=_b(node, "checkable"),
-                checked=_b(node, "checked"),
-                long_clickable=_b(node, "long-clickable"),
-            )
-        )
-    return elements
+    return [_make_element(node) for node in root.iter("node")]
+
+
+@dataclass
+class TreeNode:
+    """A UI element together with its children, preserving on-screen structure."""
+
+    element: Element
+    children: list["TreeNode"]
+
+
+def parse_tree(xml: str) -> list[TreeNode]:
+    """Parse a uiautomator XML dump into a nested tree of TreeNodes."""
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return []
+
+    def build(node: ET.Element) -> TreeNode:
+        return TreeNode(_make_element(node), [build(c) for c in node.findall("node")])
+
+    return [build(c) for c in root.findall("node")]
+
+
+def _informative(e: Element) -> bool:
+    """True if an element carries something worth showing (text or interaction)."""
+    return bool(
+        e.text or e.content_desc or e.resource_id
+        or e.clickable or e.scrollable or e.checkable or e.long_clickable
+    )
+
+
+def render_outline(nodes: list[TreeNode], *, compact: bool = True,
+                   _depth: int = 0, _lines: list[str] | None = None) -> list[str]:
+    """Render a tree as an indented outline.
+
+    With ``compact`` (default), structural-only containers are skipped but their
+    children are still shown (collapsed), so the outline stays readable while
+    preserving the parent/child layout of meaningful elements.
+    """
+    if _lines is None:
+        _lines = []
+    for n in nodes:
+        if _informative(n.element) or not compact:
+            _lines.append("  " * _depth + n.element.describe())
+            render_outline(n.children, compact=compact, _depth=_depth + 1, _lines=_lines)
+        else:
+            render_outline(n.children, compact=compact, _depth=_depth, _lines=_lines)
+    return _lines
+
+
+def extract_text(elements: list[Element]) -> list[str]:
+    """Pull the human-readable text off the screen, in document order.
+
+    Returns each element's visible text and its content-description (when that
+    adds something new), so the model can "read" the screen as plain text.
+    """
+    out: list[str] = []
+    for e in elements:
+        t = e.text.strip()
+        d = e.content_desc.strip()
+        if t:
+            out.append(t)
+        if d and d != t:
+            out.append(d)
+    return out
 
 
 def interactive(elements: list[Element]) -> list[Element]:

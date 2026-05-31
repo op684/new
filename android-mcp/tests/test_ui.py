@@ -96,6 +96,52 @@ class UITestCase(unittest.TestCase):
     def test_malformed_xml_returns_empty(self):
         self.assertEqual(ui.parse_hierarchy("not xml <<<"), [])
 
+    # -- text extraction --------------------------------------------------
+
+    def test_extract_text_reads_screen_content(self):
+        text = ui.extract_text(self.elements)
+        self.assertIn("Settings", text)        # visible text
+        self.assertIn("Open settings", text)   # content-desc adds info
+        self.assertIn("Wi-Fi", text)           # desc on the toggle
+        self.assertIn("Username", text)
+
+    def test_extract_text_skips_desc_equal_to_text(self):
+        els = ui.parse_hierarchy(
+            '<hierarchy><node text="OK" content-desc="OK" bounds="[0,0][1,1]"/></hierarchy>'
+        )
+        self.assertEqual(ui.extract_text(els), ["OK"])
+
+    def test_extract_text_empty_when_no_text(self):
+        els = ui.parse_hierarchy(
+            '<hierarchy><node class="android.widget.View" bounds="[0,0][1,1]"/></hierarchy>'
+        )
+        self.assertEqual(ui.extract_text(els), [])
+
+    # -- tree parsing -----------------------------------------------------
+
+    def test_parse_tree_structure(self):
+        tops = ui.parse_tree(SAMPLE)
+        self.assertEqual(len(tops), 1)             # one root FrameLayout
+        self.assertEqual(len(tops[0].children), 3)  # three children
+
+    def test_render_outline_compact_collapses_container(self):
+        tops = ui.parse_tree(SAMPLE)
+        lines = ui.render_outline(tops, compact=True)
+        # The bare root FrameLayout is collapsed; children render at depth 0.
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(any('"Settings"' in ln for ln in lines))
+        self.assertFalse(lines[0].startswith(" "))  # children rendered at depth 0
+
+    def test_render_outline_full_includes_container(self):
+        tops = ui.parse_tree(SAMPLE)
+        lines = ui.render_outline(tops, compact=False)
+        self.assertEqual(len(lines), 4)            # root + 3 children
+        # children are indented under the root
+        self.assertTrue(any(ln.startswith("  ") for ln in lines))
+
+    def test_parse_tree_malformed_returns_empty(self):
+        self.assertEqual(ui.parse_tree("nope <<"), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

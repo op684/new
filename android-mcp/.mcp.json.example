@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "android-control": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/absolute/path/to/android-mcp",
+        "run",
+        "android-mcp"
+      ],
+      "env": {
+        "ADB_PATH": "adb",
+        "ANDROID_SERIAL": "",
+        "ADB_TIMEOUT": "120"
+      }
+    }
+  }
+}
